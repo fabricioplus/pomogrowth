@@ -1,0 +1,2 @@
+# Fuentes con LF, como están en disco (Git detecta solo los binarios)
+* text=auto eol=lf

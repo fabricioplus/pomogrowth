@@ -1,0 +1,20 @@
+Logotipos de marca (brand-*.svg) de Simple Icons (https://simpleicons.org),
+paquete simple-icons:
+  - brand-linkedin.svg: v9.21.0 (LinkedIn ya no viene en las versiones
+    posteriores del paquete).
+  - brand-facebook.svg, brand-instagram.svg, brand-youtube.svg,
+    brand-tiktok.svg, brand-github.svg, brand-kofi.svg y brand-clickup.svg:
+    v16.30.0.
+Copiados tal cual: cada SVG es un único <path> sin color (la app lo tiñe al
+dibujarlo, como los iconos de Lucide).
+
+Licencia de los SVG: CC0 1.0 Universal (dominio público), la de Simple Icons.
+https://creativecommons.org/publicdomain/zero/1.0/
+
+Los logotipos son marcas de sus respectivos dueños (Facebook e Instagram, de
+Meta; YouTube, de Google; TikTok, de ByteDance; LinkedIn y GitHub, de
+Microsoft; Ko-fi, de Ko-fi Labs; ClickUp, de Mango Technologies). La CC0
+cubre los archivos, no las marcas: aquí solo enlazan a los perfiles de
+GrowthLab y de fabricioplus, al repositorio del proyecto y a su página de
+Ko-fi, o señalan la integración con ClickUp (el botón que crea la tarea
+también allí), y no suponen ningún patrocinio ni respaldo de esas empresas.

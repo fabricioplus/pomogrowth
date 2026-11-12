@@ -1,0 +1,30 @@
+SONIDOS DE AMBIENTE DE POMOGROWTH
+=================================
+
+Audios del mezclador «Sonidos de ambiente» (diálogo de Música). Son recursos
+de la app: van dentro del exe (_internal/assets/sounds/ambient), no junto a
+él como la música del usuario.
+
+Un archivo por sonido, con este nombre exacto (catálogo en
+core/ambient_catalog.py):
+
+  lluvia.ogg        Lluvia
+  tormenta.ogg      Tormenta
+  oceano.ogg        Océano
+  rio.ogg           Río
+  bosque.ogg        Bosque
+  chimenea.ogg      Chimenea
+  ruido_blanco.ogg  Ruido blanco
+  ruido_rosa.ogg    Ruido rosa
+  ruido_marron.ogg  Ruido marrón
+
+Formato: OGG Vorbis estéreo a 44,1 kHz, de 45 a 160 s cada uno (los genera
+scripts/build_ambient_sounds.py). No hace falta que el final empalme con el
+principio: la app los repite con un fundido cruzado de 3 s entre dos
+reproductores.
+
+Un sonido sin su archivo sale desactivado en el mezclador (con un aviso en
+el tooltip), nunca es un error.
+
+Las licencias y la procedencia de cada grabación van en CREDITOS.txt, en
+esta misma carpeta (se empaqueta con ellos).

@@ -1,0 +1,22 @@
+# PomoGrowth v9 (PySide6) — dependencias
+
+# UI
+PySide6>=6.11
+
+# Integraciones (Asana/ClickUp)
+requests>=2.31.0
+
+# Mascota IA (asistente con la API de Claude) — opcional: sin él, la mascota
+# solo usa frases locales
+anthropic>=0.100.0
+
+# Fases posteriores (opcionales por ahora):
+# matplotlib>=3.7.0     # estadísticas (fase 3)
+# openpyxl>=3.1.0       # export XLSX (fase 3)
+# pyngrok>=7.0.0        # túnel webhook (fase 2, opcional)
+
+# Desarrollo/tests
+# numpy, scipy, soundfile  # solo scripts/build_ambient_sounds.py (sonidos de ambiente)
+# numpy                    # solo scripts/build_sounds.py (sonidos del temporizador)
+# pytest>=8.0
+# pytest-qt>=4.4

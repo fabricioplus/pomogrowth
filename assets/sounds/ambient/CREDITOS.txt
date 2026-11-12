@@ -1,0 +1,63 @@
+SONIDOS DE AMBIENTE DE POMOGROWTH
+=================================
+
+Generados con scripts/build_ambient_sounds.py, que descarga los originales,
+comprueba su SHA-1 y aplica el mismo proceso a todos: tramo indicado,
+remuestreo a 44,1 kHz, filtro paso alto contra el retumbe, sonoridad igualada,
+limitador de picos, fundidos de 50 ms y recodificación en OGG Vorbis estéreo.
+
+Las grabaciones son de dominio público o están bajo CC0: no exigen
+atribución, pero se agradece aquí a sus autores. Los ruidos están
+sintetizados por el propio script y se distribuyen con la licencia de la app
+(GPL-3.0-or-later).
+
+lluvia.ogg (78 s)
+  Original: «Light Rain Distant Thunder July 5th 2016»
+  Autor:    kvgarlic (Freesound)
+  Licencia: CC0 1.0
+  Fuente:   https://commons.wikimedia.org/wiki/File:Light_Rain_Distant_Thunder_July_5th_2016.wav
+  Tramo:    0:30–1:48; paso alto 40 Hz; sonoridad objetivo -22 LUFS
+
+tormenta.ogg (160 s)
+  Original: «Thunderstorm after hot summer day, 17 minutes, 01 of 04»
+  Autor:    stephan (pdsounds.org)
+  Licencia: Dominio público
+  Fuente:   https://commons.wikimedia.org/wiki/File:Thunderstorm_after_hot_summer_day_17_minutes_01_of_04.ogg
+  Tramo:    1:02–3:42; paso alto 30 Hz; sonoridad objetivo -22 LUFS
+
+oceano.ogg (120 s)
+  Original: «Ocean Waves on a Tropical Beach»
+  Autor:    Jarrod Stanley (J. D. Savanyu)
+  Licencia: CC0 1.0
+  Fuente:   https://commons.wikimedia.org/wiki/File:Ocean_Waves_on_a_Tropical_Beach.ogg
+  Tramo:    0:40–2:40; paso alto 30 Hz; sonoridad objetivo -22 LUFS
+
+rio.ogg (90 s)
+  Original: «Sanna river rapids»
+  Autor:    Jarrod Stanley (J. D. Savanyu)
+  Licencia: CC0 1.0
+  Fuente:   https://commons.wikimedia.org/wiki/File:Sanna_river_rapids.ogg
+  Tramo:    0:30–2:00; paso alto 30 Hz; sonoridad objetivo -23 LUFS
+
+bosque.ogg (117 s)
+  Original: «Forest ambience (20090610_0)»
+  Autor:    nille (pdsounds.org)
+  Licencia: Dominio público
+  Fuente:   https://commons.wikimedia.org/wiki/File:20090610_0_ambience.ogg
+  Tramo:    0:04–2:01; paso alto 120 Hz; sonoridad objetivo -24 LUFS
+
+chimenea.ogg (68 s)
+  Original: «Crackling fireplace»
+  Autor:    nielstii (Freesound)
+  Licencia: CC0 1.0
+  Fuente:   https://freesound.org/people/nielstii/sounds/346321/
+  Tramo:    0:04–1:12; paso alto 50 Hz; sonoridad objetivo -24 LUFS
+
+ruido_blanco.ogg (45 s)
+  Ruido blanco sintetizado (potencia ∝ f^0); sonoridad objetivo -27 LUFS. GPL-3.0-or-later.
+
+ruido_rosa.ogg (45 s)
+  Ruido rosa sintetizado (potencia ∝ f^-1); sonoridad objetivo -25 LUFS. GPL-3.0-or-later.
+
+ruido_marron.ogg (45 s)
+  Ruido marrón sintetizado (potencia ∝ f^-2); sonoridad objetivo -23 LUFS. GPL-3.0-or-later.

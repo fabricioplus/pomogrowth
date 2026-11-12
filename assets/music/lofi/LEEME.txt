@@ -1,0 +1,30 @@
+MÚSICA LOFI DE POMOGROWTH
+=========================
+
+Deja en ESTA carpeta tus pistas de música y aparecerán en PomoGrowth, en el
+botón «Música» de la cabecera, como la lista «Carpeta lofi».
+
+Formatos: .mp3 (hasta 320 kbps), .aac, .m4a, .ogg, .oga, .opus, .flac, .wav
+y .wma.
+
+Notas:
+- Las pistas se ordenan alfabéticamente por nombre de archivo. Si quieres un
+  orden concreto, nómbralas "01 - Mi tema.mp3", "02 - ...", etc.
+- Solo se lee esta carpeta, no sus subcarpetas.
+- Si añades archivos con la app abierta, pulsa «Releer» en la Carpeta lofi
+  (en el diálogo de Música).
+- La lista se repite al terminar (puedes cambiarlo con el botón de repetir) y
+  también se puede escuchar en orden aleatorio.
+- La música sigue sonando aunque cierres el diálogo; se para al cerrar
+  PomoGrowth. Con «Solo durante el enfoque» suena solo mientras haya un
+  pomodoro en marcha.
+
+Además de esta carpeta, en Música puedes crear tus propias listas con:
+- radios en directo (el enlace directo del stream, p. ej. .../stream.mp3, o
+  su lista .pls/.m3u),
+- enlaces directos a archivos de audio (http/https),
+- archivos, carpetas y listas .m3u/.pls/.xspf de tu equipo (con «Archivos…»,
+  «Carpeta…» o arrastrándolos al diálogo).
+
+YouTube, Spotify y servicios parecidos no dejan reproducir su audio fuera de
+su app: sus enlaces no funcionan.

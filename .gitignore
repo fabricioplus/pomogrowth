@@ -1,0 +1,42 @@
+# --- Datos del usuario: contienen tokens (PAT de Asana, API keys de IA) ---
+pomogrowth_data.json
+user_progress.json
+focus_config.json
+*.bak
+*.tmp
+*.corrupt-*
+pomogrowth_data.pre-*.json
+# Exportaciones hechas desde la app (backups y estadísticas)
+pomogrowth_backup_*.json
+pomogrowth_stats_*.csv
+pomogrowth_stats_*.xlsx
+
+# --- Logs (uno por ejecución) ---
+logs/
+
+# --- Build de PyInstaller (dist/ guarda además los datos reales junto al exe) ---
+build/
+dist/
+
+# --- Música del usuario: solo se versiona el LEEME ---
+assets/music/lofi/*
+!assets/music/lofi/LEEME.txt
+
+# --- Python / tests ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# Entorno virtual (el README lo crea dentro del repo)
+.venv/
+
+# --- Configuración local de Claude Code ---
+.claude/settings.local.json
+
+# --- Capturas de los scripts de humo (pueden mostrar datos reales) ---
+# Solo se versionan los sprites de las mascotas
+shots/*
+!shots/sprite_pet_*.png
+
+# --- Windows ---
+Thumbs.db
+desktop.ini
