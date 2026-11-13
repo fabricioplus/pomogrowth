@@ -146,7 +146,7 @@ el temporizador en marcha). Ver [Recursos gráficos](#13-recursos-gráficos).
 | 5 | gráficos de estadísticas |
 | 9 | sonidos de ambiente para mezclar |
 | 0 | cuentas, servidores en la nube o telemetría |
-| 631 | pruebas automáticas en la versión 1.0 |
+| 899 | pruebas automáticas en la versión 1.0.1 |
 
 ---
 
@@ -393,8 +393,8 @@ cada vez que completas un pomodoro.
 
 - **Webhook de entrada**: `POST http://127.0.0.1:8081/webhook` con
   `Content-Type: application/json` y un JSON (`name` o `task_name` y,
-  opcionalmente, `tags`) crea una tarea propia en la lista mientras la
-  sincronización esté encendida. Por defecto solo atiende a los programas de
+  opcionalmente, `tags`) crea una tarea propia en la lista, también con la
+  sincronización apagada. Por defecto solo atiende a los programas de
   tu equipo; en Configuración → Webhook → «Recibir tareas» puedes elegir «Red
   local, con clave» (otros equipos envían la clave en la cabecera
   `X-PomoGrowth-Key`) o «Desactivado».
@@ -786,7 +786,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 16. **En español**: interfaz, instalador y fechas, sin depender del idioma de
     Windows (salvo los menús estándar de clic derecho y los cuadros de abrir y
     guardar archivos).
-17. **Calidad comprobada**: 631 pruebas automáticas en la versión 1.0.
+17. **Calidad comprobada**: 899 pruebas automáticas en la versión 1.0.1.
 18. **Gratis para siempre**: la versión Comunidad, la que funciona en tu equipo,
     es gratis y lo será siempre. Si te ayuda, puedes apoyarnos en Ko-fi.
 
@@ -837,7 +837,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 | Ventana principal | 1100 × 720 la primera vez (después recuerda tamaño y posición); mínimo 900 × 520 (460 px de ancho con las tareas plegadas) |
 | Ventana compacta | 312 × 116 px, siempre encima |
 | Tipografía | Segoe UI Variable (Segoe UI en Windows 10), con cifras tabulares en el timer |
-| Pruebas | 631 pruebas automáticas (pytest y pytest-qt) |
+| Pruebas | 899 pruebas automáticas (pytest y pytest-qt) |
 | Arranque (según la documentación) | ≈ 2 s; ≈ 12 s si sincroniza con Asana al abrir (casi todo es la red, tras una pantalla de carga) |
 
 ---
@@ -1452,8 +1452,7 @@ debería decir lo contrario:
 - La fecha de vencimiento solo se pone al crear la tarea, y la repetición solo
   existe en tareas propias (una tarea fija no se puede crear en Asana).
 - El webhook de entrada solo crea tareas propias (no de Asana ni de ClickUp).
-- Con el interruptor de sincronización apagado, lo que llega por el webhook
-  espera en memoria y se pierde al cerrar la app, y el pomodoro completado no
+- Con el interruptor de sincronización apagado, el pomodoro completado no
   deja comentario en Asana.
 - El evento de salida a n8n se envía una sola vez, sin reintentos.
 - Si la app se queda abierta pasada la medianoche, el Plan de hoy no vuelve a

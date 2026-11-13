@@ -32,14 +32,22 @@ errores al leer de Asana y quita de Ajustes lo que no hacía nada.
   - Solo `POST /webhook` con `Content-Type: application/json` (si no, 415),
     sin cabecera `Origin` (403: lo enviado desde una página web), con
     `Content-Length` válido (400) de hasta 64 KB (413) y un objeto JSON (400).
-    Otros métodos dan 405 y otras rutas 404. Cada petición tiene 5 s.
+    Otros métodos dan 405 y otras rutas 404.
+  - Un hilo por conexión, como mucho 8 a la vez, con 5 s por lectura y un
+    plazo total de 10 s por petición: un cliente lento ya no retiene a los
+    demás. En red local, con la clave mala no se lee más de 8 KB del cuerpo.
   - Lo recibido se crea siempre como tarea local: solo se usan el nombre
     (`name` o `task_name`, hasta 500 caracteres) y `tags` (10 como mucho, de
-    40). Un elemento raro o un alta que falla se salta sin romper la cola.
+    40), con los caracteres de control cambiados por espacios. Un elemento
+    raro o un alta que falla se salta sin romper la cola. Entra también con
+    la sincronización apagada (antes esperaba en memoria y se perdía al
+    cerrar) y lo que llega justo al salir se crea antes de cerrar.
   - Sin `SO_REUSEADDR` en Windows (otro proceso podía atar el mismo puerto y
     quedarse con las peticiones) y sin consulta DNS al arrancar el servidor.
   - El servidor se rearranca al guardar Ajustes si cambian el modo o la clave
-    (con un aviso si el puerto está ocupado) y se para al salir.
+    y se para al salir sin congelar la ventana. Si el puerto 8081 está
+    ocupado, un aviso lo dice (también al arrancar) y «Guardar» lo reintenta.
+    «Importar datos» aplica el modo y la clave importados.
   - En una instalación nueva, Windows ya no pide permiso en el firewall al
     primer arranque (solo al elegir «Red local, con clave»).
 
@@ -53,7 +61,24 @@ errores al leer de Asana y quita de Ajustes lo que no hacía nada.
   token de acceso (HTTP 401). Revísalo en ⚙ Configuración → Asana.», «Asana
   pide esperar: demasiadas peticiones. Se reintentará en N min.», «Sin
   conexión con Asana.»… Ante un 429 o un 5xx se reintenta solo, respetando
-  `Retry-After`. Un workspace que falla invalida el sync entero.
+  `Retry-After` (hasta 1 h); los reintentos automáticos solo cambian la
+  línea de estado, sin volver a abrir el diálogo. Un workspace que falla
+  invalida el sync entero, y más de 200 páginas se dan por respuesta
+  ilegible.
+- **Etiqueta de conexión de Asana**: con un token rechazado dice «● Asana:
+  revisa el token»; con un workspace o proyecto inaccesible, «● Asana: revisa
+  la configuración»; con un 429 o un 5xx, «● Asana no responde». Antes, «●
+  Sin conexión con Asana» para todo.
+- Apagar el interruptor de sincronización mientras Asana devolvía un error ya
+  no abre el diálogo de error de ese sync cancelado.
+- Un `null` en el workspace o el proyecto de Asana (JSON editado a mano)
+  dejaba el sync atascado en «Sincronización ya en curso…» hasta reiniciar, y
+  una conexión que no era un objeto lo hacía fallar con un error interno.
+- **Guardado de datos**: un texto que no se puede escribir en UTF-8 (un emoji
+  partido por la mitad, recibido por el webhook o de otro origen) hacía
+  fallar en silencio TODOS los guardados de la sesión, que se perdía al
+  cerrar. Ahora se guarda igual (escapado) y el webhook lo sanea al
+  recibirlo.
 - **Ajustes → «Cargar proyectos»** recorre todas las páginas y, si falla,
   dice por qué (antes, «No se encontraron proyectos» o solo la primera
   página).
@@ -76,7 +101,9 @@ errores al leer de Asana y quita de Ajustes lo que no hacía nada.
   internet (requests, urllib y httpx; loopback permitido).
 - Caracterización del sync con Asana (`test_asana_caracterizacion.py`) antes
   de tocarlo, y pruebas nuevas de los errores de Asana, del webhook (con el
-  servidor real en un puerto libre) y de la pestaña ClickUp: 842 en total.
+  servidor real en un puerto libre) y de la pestaña ClickUp. Ningún test
+  abre ya el puerto 8081 (podía chocar con la app abierta) y los servicios de
+  Asana se apagan al acabar cada test: 899 en total.
 
 ---
 
