@@ -808,8 +808,7 @@ class SettingsDialog(BrandedDialog):
             f"Envío: POST http://127.0.0.1:{Config.WEBHOOK_PORT}{WEBHOOK_PATH} (en red "
             "local, con la IP de este equipo) con la cabecera Content-Type: "
             f"application/json y, en red local, {KEY_HEADER} con la clave.\n"
-            'Cuerpo: {"name": "…", "tags": ["…"]}. Se crea siempre como tarea local '
-            "y llega con la sincronización activada.\n"
+            'Cuerpo: {"name": "…", "tags": ["…"]}. Se crea siempre como tarea local.\n'
             "En red local, Windows pedirá permiso del cortafuegos la primera vez."))
 
     def _sync_webhook_mode(self, *_args) -> None:
@@ -836,6 +835,19 @@ class SettingsDialog(BrandedDialog):
         self.webhook_key_status.set_status(
             "Clave nueva: vale desde que guardes. Cámbiala también donde usabas la anterior",
             'warn')
+
+    def _show_webhook_settings(self, s: Dict) -> None:
+        """La pestaña Webhook con estos ajustes (tras importar datos: así
+        «Guardar» no vuelve a escribir los de antes)."""
+        from services.webhook_server import normalize_key, normalize_mode
+        url = s.get('n8n_webhook_url')
+        self.ed_n8n.setText(url if isinstance(url, str) else '')
+        self.ed_webhook_key.setText(normalize_key(s.get('webhook_key')))
+        self.ed_webhook_key.setCursorPosition(0)
+        self.webhook_key_status.set_status('')
+        self.cb_webhook_mode.setCurrentIndex(max(0, self.cb_webhook_mode.findData(
+            normalize_mode(s.get('webhook_mode')))))
+        self._sync_webhook_mode()  # también si el modo no cambió
 
     def _save_webhook_inbox(self, s: Dict) -> None:
         from services.webhook_server import new_key, normalize_mode
@@ -1171,6 +1183,11 @@ class SettingsDialog(BrandedDialog):
             # Sin traer la cola hacia Asana del archivo (ver import_data)
             self.data_handler.import_data(imported)
             self.controller.refresh_task_list()
+            # «Recibir tareas» del archivo: el servidor, ya con lo importado
+            # (rearranca si cambió, como al guardar; con 'lan' sin clave crea
+            # una), y la pestaña Webhook lo muestra
+            self.controller.apply_webhook_settings(self.data_handler.load_settings())
+            self._show_webhook_settings(self.data_handler.load_settings())
             self.data_status.set_status("Datos importados (backup previo creado)", 'ok')
         except Exception as e:
             self.data_status.set_status(str(e), 'error')

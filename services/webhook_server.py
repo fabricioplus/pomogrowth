@@ -1,4 +1,6 @@
-"""Servidor HTTP en un hilo para recibir tareas por webhook (POST /webhook).
+"""Servidor HTTP para recibir tareas por webhook (POST /webhook): un hilo por
+conexión, como mucho MAX_CONNECTIONS a la vez y con un plazo total por
+petición (un cliente lento no retiene a los demás ni a stop()).
 
 Extraído de pomogrowth_v8_ultra/app_ultra.py (extract_from_v8.py, una sola vez).
 A partir de aquí este archivo es fuente normal de v9.
@@ -20,15 +22,20 @@ respuestas van en JSON.
 
 El servidor solo encola el objeto recibido: qué se toma de él lo decide
 task_fields() (el controlador crea siempre tareas locales, nunca enlazadas
-a Asana).
+a Asana). Una vez parado, lo que una conexión ya abierta termine de enviar
+recibe 503 y no se encola.
 """
 import hmac
+import io
 import json
 import os
 import queue
+import re
 import secrets
 import socketserver
+import sys
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any, List, Optional, Tuple
@@ -51,10 +58,21 @@ MAX_BODY = 64 * 1024
 # responder: cerrar con datos sin leer resetea la conexión y el cliente no
 # llegaría a ver el código de error
 MAX_DRAIN = 1024 * 1024
-# El servidor atiende de una en una: un cliente lento no lo retiene más que esto
+# En 'lan', a quien no trae la clave buena no se le lee más que esto
+UNAUTHORIZED_DRAIN = 8 * 1024
+# Cada lectura del socket espera como mucho REQUEST_TIMEOUT_S (una conexión
+# muda se corta) y la petición entera, REQUEST_DEADLINE_S (también se corta
+# a un cliente que gotea bytes sin agotar nunca el timeout de cada lectura)
 REQUEST_TIMEOUT_S = 5
-# Cada cuánto mira serve_forever si se le pidió parar (lo que tarda stop())
+REQUEST_DEADLINE_S = 10
+# Conexiones atendidas a la vez (un hilo cada una); las de más se cierran
+# sin atender
+MAX_CONNECTIONS = 8
+# Cada cuánto mira serve_forever si se le pidió parar
 POLL_INTERVAL_S = 0.25
+# Lo más que stop() espera a serve_forever: corre en el hilo de la interfaz
+# (al salir y al guardar Ajustes)
+STOP_WAIT_S = 1.0
 
 # Lo que se toma de cada tarea recibida (task_fields)
 NAME_MAX_LEN = 500
@@ -81,16 +99,29 @@ def bind_host(mode: str) -> Optional[str]:
     return HOSTS.get(normalize_mode(mode))
 
 
+# Surrogates UTF-16 sueltos (JSON.stringify de un texto cortado a mitad de
+# un emoji da "\ud83d"): no se pueden escribir en UTF-8 y, ya en los datos,
+# harían fallar cada guardado. Y los caracteres de control (C0, DEL y C1)
+_LONE_SURROGATE = re.compile(r'[\ud800-\udfff]')
+_CONTROL_CHARS = re.compile(r'[\x00-\x1f\x7f-\x9f]')
+
+
 def _clean_text(value: Any, max_len: int) -> str:
-    return value.strip()[:max_len].strip() if isinstance(value, str) else ''
+    """Un texto recibido, saneado: surrogates sueltos → U+FFFD, caracteres de
+    control → espacio, sin espacios en los bordes y recortado a max_len."""
+    if not isinstance(value, str):
+        return ''
+    value = _CONTROL_CHARS.sub(' ', _LONE_SURROGATE.sub('�', value))
+    return value.strip()[:max_len].strip()
 
 
 def task_fields(data: Any) -> Optional[Tuple[str, List[str]]]:
     """De lo recibido, solo el nombre (`name` o `task_name`, sin espacios en
     los bordes y recortado a NAME_MAX_LEN) y las etiquetas (`tags`: lista de
-    textos, como mucho MAX_TAGS de TAG_MAX_LEN caracteres, sin repetir). Todo
-    lo demás (source, asana_id, enlaces…) se descarta. None si no hay un
-    nombre válido o lo recibido no es un objeto. Nunca lanza."""
+    textos, como mucho MAX_TAGS de TAG_MAX_LEN caracteres, sin repetir), los
+    dos saneados (_clean_text). Todo lo demás (source, asana_id, enlaces…) se
+    descarta. None si no hay un nombre válido o lo recibido no es un objeto.
+    Nunca lanza."""
     if not isinstance(data, dict):
         return None
     name = _clean_text(data.get('name'), NAME_MAX_LEN) or _clean_text(
@@ -108,10 +139,38 @@ def task_fields(data: Any) -> Optional[Tuple[str, List[str]]]:
     return name, tags
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Lecturas del socket con un plazo total: cada recv espera lo que quede
+    hasta `deadline` (nunca más de REQUEST_TIMEOUT_S) y, agotado, TimeoutError
+    (http.server cierra entonces la conexión sin responder)."""
+
+    def __init__(self, sock, deadline: float):
+        super().__init__()
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("plazo de la petición agotado")
+        self._sock.settimeout(min(REQUEST_TIMEOUT_S, left))
+        return self._sock.recv_into(buffer)
+
+
 class _Handler(BaseHTTPRequestHandler):
     server_version = 'PomoGrowth'
     sys_version = ''
     timeout = REQUEST_TIMEOUT_S
+
+    def setup(self):
+        super().setup()
+        # Lo que se lee (petición, cabeceras y cuerpo), con plazo total
+        self.rfile.close()
+        self.rfile = io.BufferedReader(_DeadlineReader(
+            self.connection, time.monotonic() + REQUEST_DEADLINE_S))
 
     def log_message(self, format, *args):  # sin ruido en la consola
         return
@@ -157,7 +216,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _discard_body(self) -> None:
         length = self._content_length()
-        if not length or length > MAX_DRAIN:
+        # En 'lan', sin la clave buena, como mucho unos KB
+        limit = (MAX_DRAIN if self.server.mode != 'lan' or self._key_ok()
+                 else UNAUTHORIZED_DRAIN)
+        if not length or length > limit:
             return
         try:
             while length > 0:
@@ -204,7 +266,8 @@ class _Handler(BaseHTTPRequestHandler):
             return self._reply(400, 'Bad Request: invalid JSON')
         if not isinstance(data, dict):
             return self._reply(400, 'Bad Request: the body must be a JSON object')
-        self.server.webhook_queue.put(data)
+        if not self.server.enqueue(data):
+            return self._reply(503, 'Service Unavailable: the server is stopping')
         self._reply(200, 'Task received')
 
     def _method_not_allowed(self):
@@ -215,7 +278,12 @@ class _Handler(BaseHTTPRequestHandler):
     do_OPTIONS = _method_not_allowed
 
 
-class _Server(HTTPServer):
+class _Server(socketserver.ThreadingMixIn, HTTPServer):
+    # Un hilo por conexión: serve_forever solo acepta, así que un cliente
+    # lento no retiene a los demás ni a shutdown(). Hilos daemon y
+    # server_close() sin esperarlos: parar no espera a una conexión colgada
+    daemon_threads = True
+    block_on_close = False
     # En Windows, SO_REUSEADDR deja a otro socket (otro programa, otra copia
     # de la app) atar el mismo puerto y quedarse con las peticiones; sin él,
     # volver a arrancar en el mismo puerto tras server_close() funciona
@@ -226,7 +294,48 @@ class _Server(HTTPServer):
         self.webhook_queue = webhook_queue
         self.mode = mode
         self.key = key
+        self.stopped = False
+        self._lock = threading.Lock()
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         super().__init__(address, _Handler)
+
+    def enqueue(self, data: dict) -> bool:
+        """Encola lo recibido; False si el servidor ya se paró (al salir, la
+        app vacía la cola después de parar: lo de después no lo vería)."""
+        with self._lock:
+            if self.stopped:
+                return False
+            self.webhook_queue.put(data)
+            return True
+
+    def mark_stopped(self) -> None:
+        with self._lock:
+            self.stopped = True
+
+    # --- tope de conexiones simultáneas ---
+    def verify_request(self, request, client_address) -> bool:
+        # Sin sitio, socketserver la cierra sin atenderla
+        return self._slots.acquire(blocking=False)
+
+    def process_request(self, request, client_address):
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()  # su hilo no llegó a arrancar
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request, client_address):
+        # Un cliente que corta la conexión a medias no es un fallo de la app:
+        # sin traza en la consola (lo demás, con la suya, como siempre)
+        if isinstance(sys.exc_info()[1], OSError):
+            return
+        super().handle_error(request, client_address)
 
     def server_bind(self):
         # Sin el socket.getfqdn() de HTTPServer.server_bind: con 0.0.0.0
@@ -236,12 +345,13 @@ class _Server(HTTPServer):
 
 
 class WebhookServer:
-    """Servidor de webhooks en un hilo. `mode`: 'local' | 'lan' | 'off' (con
-    'off' no abre ningún puerto y start() no hace nada). `key`: la clave del
-    modo 'lan'; sin clave, en 'lan' se rechaza todo. `host` sustituye a la
-    dirección del modo (solo los tests: probar 'lan' sin abrir el puerto a la
-    red). Con `port` 0 el sistema elige uno libre (ver `address`). Lanza
-    OSError si el puerto está ocupado."""
+    """Servidor de webhooks en un hilo (más uno por conexión, ver _Server).
+    `mode`: 'local' | 'lan' | 'off' (con 'off' no abre ningún puerto y
+    start() no hace nada). `key`: la clave del modo 'lan'; sin clave, en
+    'lan' se rechaza todo. `host` sustituye a la dirección del modo (solo los
+    tests: probar 'lan' sin abrir el puerto a la red). Con `port` 0 el
+    sistema elige uno libre (ver `address`). Lanza OSError si el puerto está
+    ocupado."""
 
     def __init__(self, webhook_queue: queue.Queue, port: int, mode: str = DEFAULT_MODE,
                  key: str = '', host: Optional[str] = None):
@@ -273,14 +383,19 @@ class WebhookServer:
         self.thread.start()
 
     def stop(self) -> None:
-        """Para el hilo y cierra el puerto: se puede volver a arrancar otro
-        servidor en el mismo. Esperar a serve_forever es breve (POLL_INTERVAL_S,
-        o lo que quede de una petición en curso)."""
+        """Deja de escuchar y cierra el puerto (se puede volver a arrancar
+        otro servidor en el mismo enseguida) sin esperar a las conexiones en
+        curso: lo que terminen de enviar ya no se encola (503). Corre en el
+        hilo de la interfaz: nunca la retiene más de STOP_WAIT_S."""
         server, self.server = self.server, None
         if server is None:
             return
-        if self.thread is not None:
-            server.shutdown()  # sin start() no se llama: esperaría para siempre
-            self.thread.join(timeout=REQUEST_TIMEOUT_S)
-            self.thread = None
+        server.mark_stopped()
+        thread, self.thread = self.thread, None
+        if thread is not None:
+            # shutdown() espera a que serve_forever salga: en un hilo aparte y
+            # aquí solo un rato (sin start() no se llama: esperaría siempre)
+            threading.Thread(target=server.shutdown, name='webhook-stop',
+                             daemon=True).start()
+            thread.join(timeout=STOP_WAIT_S)
         server.server_close()

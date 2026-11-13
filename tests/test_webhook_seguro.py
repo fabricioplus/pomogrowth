@@ -13,6 +13,11 @@
 - Ajustes: «Recibir tareas» (combo, clave solo en red local con Copiar y
   Regenerar, nota con el uso) en lugar de los controles de ngrok, que no
   hacían nada.
+- Robustez: un hilo por conexión con tope y plazo total por petición (un
+  cliente que gotea no retiene a los demás ni a stop(), que nunca congela la
+  interfaz), textos rotos (surrogates sueltos) que ya no impiden guardar, la
+  cola que entra con el sync apagado y se vacía al salir, el puerto ocupado
+  al arrancar (aviso y reintento al guardar) e «Importar datos».
 
 Ejecutar desde la raíz del repositorio:
     QT_QPA_PLATFORM=offscreen python -m pytest tests/test_webhook_seguro.py -q
@@ -26,6 +31,8 @@ import os
 import queue
 import socket
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -387,17 +394,19 @@ class FakeWebhookServer:
 
 @pytest.fixture
 def build(qtbot, tmp_path, monkeypatch):
-    """build(settings, real=False) → AppController sobre datos sintéticos.
-    Sin `real`, con FakeWebhookServer; con `real`, el servidor de verdad en
-    un puerto libre de 127.0.0.1 (nunca el 8081)."""
+    """build(settings, real=False, port=None) → AppController sobre datos
+    sintéticos. Sin `real`, con FakeWebhookServer; con `real`, el servidor de
+    verdad (conftest pone uno falso por defecto) en `port` o en un puerto
+    libre de 127.0.0.1 (nunca el 8081)."""
     monkeypatch.chdir(tmp_path)
     fonts.init_fonts()
     FakeWebhookServer.instances = []
     built = []
 
-    def _build(settings=None, real=False):
+    def _build(settings=None, real=False, port=None):
         if real:
-            monkeypatch.setattr(Config, 'WEBHOOK_PORT', _free_port())
+            monkeypatch.setattr(webhook_server, 'WebhookServer', WebhookServer)
+            monkeypatch.setattr(Config, 'WEBHOOK_PORT', port or _free_port())
         else:
             monkeypatch.setattr(webhook_server, 'WebhookServer', FakeWebhookServer)
         dh = DataHandler(_make_data(tmp_path, settings))
@@ -585,15 +594,16 @@ def test_nombre_largo_recortado_y_etiquetas_saneadas(build):
     assert task['tags'][:2] == ['ok', 'T' * 40]
 
 
-def test_con_el_sync_apagado_la_cola_espera(build):
+def test_con_el_sync_apagado_la_tarea_entra_igual(build):
+    """Lo recibido es siempre una tarea local, que no toca Asana: no espera
+    al interruptor de sincronización (antes se quedaba en una cola en memoria
+    tras responder 200 y se perdía al salir)."""
     ctrl = build()
     ctrl.sync_enabled = False
-    ctrl.webhook_queue.put({'name': 'Luego'})
+    ctrl.webhook_queue.put({'name': 'Ya'})
     ctrl._process_webhook_queue()
-    assert _webhook_tasks(ctrl) == [] and not ctrl.webhook_queue.empty()
-    ctrl.sync_enabled = True
-    ctrl._process_webhook_queue()
-    assert [t['name'] for t in _webhook_tasks(ctrl)] == ['Luego']
+    assert [t['name'] for t in _webhook_tasks(ctrl)] == ['Ya']
+    assert ctrl.webhook_queue.empty()
 
 
 def test_de_punta_a_punta_un_post_real_crea_una_tarea_local(build):
@@ -642,6 +652,8 @@ def test_pestana_webhook_sin_ngrok_y_con_recibir_tareas(build, qtbot):
                  "Content-Type: application/json", "X-PomoGrowth-Key",
                  '{"name": "…", "tags": ["…"]}', "tarea local", "cortafuegos"):
         assert part in note, part
+    # Entra también con la sincronización apagada: la nota ya no la pide
+    assert "sincronización" not in note
     # La mascota sigue con su endpoint de ngrok (otro uso, intacto)
     pet = dlg.tabs.widget(4)
     assert any('ngrok' in t for t in _texts(pet))
@@ -721,3 +733,464 @@ def test_copiar_y_regenerar_la_clave(build, qtbot, monkeypatch):
     assert ctrl.data_handler.load_settings()['webhook_key'] == new
     assert FakeWebhookServer.instances[-1].key == new
     dlg.deleteLater()
+
+
+def test_ir_a_red_local_y_volver_sin_guardar_no_rearranca(build, qtbot):
+    """Elegir «Red local» crea una clave en el campo; volver al modo de antes
+    y guardar no rearranca el servidor: la clave solo cuenta en 'lan'."""
+    ctrl = build({'webhook_mode': 'local', 'webhook_key': ''})
+    first = FakeWebhookServer.instances[-1]
+    dlg, _tab = _dialog(qtbot, ctrl)
+    cb = dlg.cb_webhook_mode
+    cb.setCurrentIndex(cb.findData('lan'))
+    assert dlg.ed_webhook_key.text()
+    cb.setCurrentIndex(cb.findData('local'))
+    dlg.accept_settings()
+    assert len(FakeWebhookServer.instances) == 1 and not first.stopped
+    assert ctrl.webhook_server is first
+    dlg.deleteLater()
+
+
+def test_importar_datos_aplica_su_webhook_y_la_pestana_lo_muestra(build, qtbot, monkeypatch,
+                                                                  tmp_path):
+    """«Importar datos» puede traer otro modo y otra clave: el servidor se
+    rearranca con ellos (como al guardar) y la pestaña Webhook los muestra,
+    así que «Guardar» después no vuelve a escribir los de antes."""
+    from ui.dialogs import settings_dialog
+    ctrl = build({'webhook_mode': 'local', 'n8n_webhook_url': ''})
+    first = FakeWebhookServer.instances[-1]
+    dlg, _tab = _dialog(qtbot, ctrl)
+    # Copia sintética a importar y el archivo de datos que _import_data
+    # respalda antes (relativo al cwd, que build lleva a tmp_path)
+    assert Path.cwd() == tmp_path
+    (tmp_path / "pomogrowth_data.json").write_text(
+        ctrl.data_handler.filepath.read_text(encoding="utf-8"), encoding="utf-8")
+    backup = tmp_path / "copia" / "backup.json"
+    backup.parent.mkdir()
+    backup.write_text(json.dumps({
+        'tasks': [{'id': ID1, 'name': 'Del backup', 'completed': False, 'tags': [],
+                   'source': 'local', 'asana_id': None, 'due': None}],
+        'settings': {'webhook_mode': 'lan', 'webhook_key': 'clave-importada',
+                     'n8n_webhook_url': 'https://n8n.example/webhook/importado'}}),
+        encoding="utf-8")
+    monkeypatch.setattr(settings_dialog.QFileDialog, 'getOpenFileName',
+                        staticmethod(lambda *a, **k: (str(backup), "JSON (*.json)")))
+    monkeypatch.setattr(settings_dialog, 'confirm', lambda *a, **k: True)
+    dlg._import_data()
+    assert "importados" in dlg.data_status.text()
+    second = FakeWebhookServer.instances[-1]
+    assert first.stopped and (second.mode, second.key, second.started) == (
+        'lan', 'clave-importada', True)
+    assert ctrl.webhook_server is second
+    assert dlg.cb_webhook_mode.currentData() == 'lan'
+    assert dlg.ed_webhook_key.text() == 'clave-importada'
+    assert not dlg.webhook_key_row.isHidden()
+    assert dlg.ed_n8n.text() == 'https://n8n.example/webhook/importado'
+    dlg.accept_settings()
+    s = ctrl.data_handler.load_settings()
+    assert (s['webhook_mode'], s['webhook_key'], s['n8n_webhook_url']) == (
+        'lan', 'clave-importada', 'https://n8n.example/webhook/importado')
+    assert len(FakeWebhookServer.instances) == 2  # guardar no rearranca otra vez
+    dlg.deleteLater()
+
+
+# ======================================================================
+# Robustez del servidor: hilos, plazos, tope de conexiones y parada
+# ======================================================================
+class _Goteo:
+    """Un cliente que envía el principio de una petición y después un byte
+    cada `every` s (por debajo del timeout de cada lectura, 5 s) durante
+    `seconds` s como mucho; luego cierra. Su hilo sigue vivo mientras siga
+    conectado y enviando."""
+
+    def __init__(self, port, every=0.3, seconds=4.0,
+                 first=b'POST /webhook HTTP/1.1\r\nHost: x\r\nX-Relleno: '):
+        self.sock = socket.create_connection(('127.0.0.1', port), timeout=10)
+        self.sock.sendall(first)
+        self._stop = threading.Event()
+        self.thread = threading.Thread(target=self._run, args=(every, seconds), daemon=True)
+        self.thread.start()
+
+    def _run(self, every, seconds):
+        end = time.monotonic() + seconds
+        try:
+            while not self._stop.wait(every) and time.monotonic() < end:
+                self.sock.sendall(b'a')
+        except OSError:
+            pass
+
+    def close(self):
+        self._stop.set()
+        self.thread.join(5)
+        self.sock.close()
+
+
+def _closed_by_server(sock, timeout) -> bool:
+    """True si el servidor cierra la conexión (FIN o reset) antes de `timeout`."""
+    sock.settimeout(timeout)
+    try:
+        return sock.recv(1024) == b''
+    except (ConnectionResetError, ConnectionAbortedError):
+        return True
+    except TimeoutError:
+        return False
+
+
+def test_un_cliente_que_gotea_no_retiene_a_los_demas(servidor):
+    """Antes el servidor atendía de una en una y el timeout contaba por cada
+    lectura: un equipo de la red sin clave que goteaba cabeceras bloqueaba
+    todas las entregas."""
+    key = webhook_server.new_key()
+    ws, q = servidor('lan', key)
+    port = ws.address[1]
+    goteo = _Goteo(port, seconds=6.0)  # sin clave y sin terminar nunca
+    time.sleep(0.3)  # que el servidor ya lo esté atendiendo
+    try:
+        t0 = time.monotonic()
+        status, _h, _b = _post(port, {'name': 'Legítima'}, {'X-PomoGrowth-Key': key})
+        elapsed = time.monotonic() - t0
+    finally:
+        goteo.close()
+    assert status == 200 and elapsed < 2, elapsed
+    assert q.get_nowait() == {'name': 'Legítima'}
+
+
+def test_parar_con_un_cliente_lento_no_bloquea_y_el_puerto_se_reabre(servidor):
+    """stop() corre en el hilo de la interfaz (al salir y al guardar
+    Ajustes): con un cliente que gotea, la congelaba mientras durara."""
+    ws, _q = servidor()
+    port = ws.address[1]
+    goteo = _Goteo(port, seconds=4.0)
+    time.sleep(0.3)
+    try:
+        t0 = time.monotonic()
+        ws.stop()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 1.5, elapsed
+        assert not ws.running and ws.server is None
+        # El mismo puerto, otra vez, con ese cliente aún colgado
+        assert goteo.thread.is_alive()
+        q2 = queue.Queue()
+        again = WebhookServer(q2, port, mode='local')
+        again.start()
+        try:
+            assert _post(port, {'name': 'Tras rearrancar'})[0] == 200
+        finally:
+            again.stop()
+        assert q2.get_nowait() == {'name': 'Tras rearrancar'}
+    finally:
+        goteo.close()
+
+
+def test_el_plazo_total_corta_a_un_cliente_que_gotea(servidor, monkeypatch):
+    """REQUEST_TIMEOUT_S cuenta por cada lectura: un byte cada 0,3 s nunca lo
+    agota. El plazo total de la petición sí lo corta."""
+    monkeypatch.setattr(webhook_server, 'REQUEST_DEADLINE_S', 1.0, raising=False)
+    ws, q = servidor()
+    goteo = _Goteo(ws.address[1], seconds=8.0)
+    t0 = time.monotonic()
+    try:
+        closed = _closed_by_server(goteo.sock, timeout=5)
+        elapsed = time.monotonic() - t0
+    finally:
+        goteo.close()
+    assert closed and elapsed < 3, elapsed
+    assert q.empty()
+
+
+def test_una_conexion_muda_se_corta_por_el_timeout_de_cada_lectura(servidor, monkeypatch):
+    """Cada lectura espera como mucho REQUEST_TIMEOUT_S (lo aplica el lector
+    del handler en cada recv, no solo _Handler.timeout): una conexión que no
+    envía nada se cierra sin esperar al plazo total y deja su sitio."""
+    assert 0 < webhook_server.REQUEST_TIMEOUT_S <= webhook_server.REQUEST_DEADLINE_S <= 30
+    monkeypatch.setattr(webhook_server, 'REQUEST_TIMEOUT_S', 0.5)
+    ws, q = servidor()
+    muda = socket.create_connection(('127.0.0.1', ws.address[1]), timeout=5)
+    try:
+        t0 = time.monotonic()
+        assert _closed_by_server(muda, timeout=4)
+        assert time.monotonic() - t0 < 2
+    finally:
+        muda.close()
+    assert q.empty()
+
+
+def test_json_muy_anidado_400(servidor):
+    ws, q = servidor()
+    body = b'[' * 50_000  # RecursionError en json.loads, por debajo de MAX_BODY
+    assert len(body) <= webhook_server.MAX_BODY
+    status, _h, data = _post(ws.address[1], body)
+    assert status == 400 and data['status'] == 'Bad Request: invalid JSON'
+    assert q.empty()
+
+
+def test_cuerpo_mas_corto_que_content_length_400(servidor):
+    ws, q = servidor()
+    body = b'{"name": "x"}'
+    sock = socket.create_connection(('127.0.0.1', ws.address[1]), timeout=5)
+    try:
+        sock.sendall(b'POST /webhook HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n'
+                     b'Content-Length: %d\r\n\r\n' % (len(body) + 20) + body)
+        sock.shutdown(socket.SHUT_WR)
+        reply = b''
+        while chunk := sock.recv(4096):
+            reply += chunk
+    finally:
+        sock.close()
+    assert reply.startswith(b'HTTP/1.0 400') and b'incomplete body' in reply
+    assert q.empty()
+
+
+def test_dos_content_length_400(servidor):
+    ws, q = servidor()
+    status, body = _raw_post(ws.address[1], [('Content-Type', 'application/json'),
+                                             ('Content-Length', '13'),
+                                             ('Content-Length', '13')], b'{"name": "x"}')
+    assert status == 400 and 'Content-Length' in body['status']
+    assert q.empty()
+
+
+def test_las_conexiones_de_mas_se_cierran_sin_atender(servidor, monkeypatch):
+    monkeypatch.setattr(webhook_server, 'MAX_CONNECTIONS', 2, raising=False)
+    ws, q = servidor()
+    port = ws.address[1]
+    mudas = [socket.create_connection(('127.0.0.1', port), timeout=5) for _ in range(2)]
+    try:
+        time.sleep(0.3)
+        extra = socket.create_connection(('127.0.0.1', port), timeout=5)
+        try:
+            t0 = time.monotonic()
+            assert _closed_by_server(extra, timeout=3)
+            assert time.monotonic() - t0 < 1.5
+        finally:
+            extra.close()
+    finally:
+        for s in mudas:
+            s.close()
+    # Cerradas las mudas, quedan sitios libres (en cuanto sus hilos lo notan)
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            status = _post(port, {'name': 'Con sitio'})[0]
+            break
+        except OSError:  # aún sin sitio: cerrada sin atender
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.1)
+    assert status == 200 and q.get_nowait() == {'name': 'Con sitio'}
+
+
+def test_lan_con_clave_mala_no_espera_un_cuerpo_grande(servidor):
+    """En 'lan', a quien no trae la clave buena no se le leen más que unos
+    KB: no se espera a que llegue (ni se lee) un cuerpo de medio mega."""
+    key = webhook_server.new_key()
+    ws, q = servidor('lan', key)
+    sock = socket.create_connection(('127.0.0.1', ws.address[1]), timeout=4)
+    try:
+        sock.sendall(b'POST /webhook HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n'
+                     b'X-PomoGrowth-Key: mala\r\nContent-Length: 500000\r\n\r\n')
+        t0 = time.monotonic()
+        status_line = sock.makefile('rb').readline()
+        elapsed = time.monotonic() - t0
+    finally:
+        sock.close()
+    assert status_line.split()[1] == b'401' and elapsed < 1.5, (status_line, elapsed)
+    assert q.empty()
+
+
+def test_lo_que_termina_de_llegar_tras_parar_no_se_encola(servidor):
+    """Al salir, la app vacía la cola después de parar el servidor: lo que
+    una conexión ya abierta termine de enviar después recibe 503, no un 200
+    que nadie atendería."""
+    ws, q = servidor()
+    body = json.dumps({'name': 'Tarde'}).encode('utf-8')
+    sock = socket.create_connection(('127.0.0.1', ws.address[1]), timeout=4)
+    try:
+        sock.sendall(b'POST /webhook HTTP/1.1\r\nHost: x\r\n')  # cabeceras a medias
+        time.sleep(0.3)
+        ws.stop()
+        sock.sendall(b'Content-Type: application/json\r\nContent-Length: %d\r\n\r\n'
+                     % len(body) + body)
+        status_line = sock.makefile('rb').readline()
+    finally:
+        sock.close()
+    assert status_line.split()[1:2] == [b'503'], status_line
+    assert q.empty()
+
+
+# ======================================================================
+# Textos rotos: un surrogate UTF-16 suelto no impide guardar
+# ======================================================================
+# Lo que manda JSON.stringify de un texto cortado a mitad de un emoji
+# ("Revisar 😀".slice(0, 9)) y una etiqueta con el otro medio
+SURROGATE_BODY = b'{"name": "Revisar \\ud83d", "tags": ["n8n \\udc00", "ok"]}'
+
+
+def test_task_fields_sin_surrogates_sueltos_ni_caracteres_de_control():
+    tf = webhook_server.task_fields
+    name, tags = tf(json.loads(SURROGATE_BODY))
+    assert (name, tags) == ('Revisar �', ['n8n �', 'ok'])
+    for text in [name] + tags:
+        text.encode('utf-8')  # ya no lanza UnicodeEncodeError
+    assert tf({'name': 'Línea 1\nLínea 2\t\x00\x7f\x85', 'tags': ['a\x1bb', '\r\n']}) == (
+        'Línea 1 Línea 2', ['a b'])
+    assert tf({'name': '\x00\n\t', 'task_name': 'De respaldo'}) == ('De respaldo', [])
+    assert tf({'name': '\x00\n\t'}) is None
+    # Un emoji entero (o su par de surrogates escapado en el JSON) no se toca
+    assert tf({'name': 'Hecho \U0001F600', 'tags': ['ñandú']}) == ('Hecho \U0001F600', ['ñandú'])
+    assert tf(json.loads('{"name": "Par \\ud83d\\ude00"}')) == ('Par \U0001F600', [])
+
+
+def _session_survives(path, expected_names):
+    """La sesión entera está en disco: tareas, ajuste e histórico."""
+    again = DataHandler(path)
+    assert again.load_error is None
+    assert [t['name'] for t in again.get_tasks()] == expected_names
+    assert again.load_settings()['pomodoro_min'] == 50
+    assert [h['action'] for h in again.data['history']].count('add_task') == 2
+
+
+def test_un_post_con_un_surrogate_suelto_no_rompe_los_guardados(servidor, tmp_path):
+    """Antes la tarea entraba en memoria con el surrogate y desde ahí TODOS
+    los guardados de la sesión fallaban en silencio (UnicodeEncodeError):
+    al reiniciar se había perdido todo lo de esa sesión."""
+    ws, q = servidor()
+    assert _post(ws.address[1], SURROGATE_BODY)[0] == 200
+    path = _make_data(tmp_path)
+    dh = DataHandler(path)
+    name, tags = webhook_server.task_fields(q.get_nowait())
+    dh.add_task(name=name, tags=tags, source='local')  # = _process_webhook_queue
+    dh.add_task(name='A mano, después', tags=[], source='local')
+    s = dh.load_settings()
+    s['pomodoro_min'] = 50
+    dh.save_settings(s)
+    _session_survives(path, ['A mano, después', 'Revisar �', 'Informe'])
+
+
+def test_un_surrogate_suelto_de_otro_origen_tampoco_envenena_la_sesion(tmp_path):
+    """Red de seguridad (utils/safe_json): venga de donde venga el texto roto,
+    el JSON se escribe escapado (ensure_ascii) y se vuelve a cargar igual."""
+    path = _make_data(tmp_path)
+    dh = DataHandler(path)
+    dh.add_task(name='Roto \ud83d', tags=['x\udc00'], source='local')
+    dh.add_task(name='A mano, después', tags=[], source='local')
+    s = dh.load_settings()
+    s['pomodoro_min'] = 50
+    dh.save_settings(s)
+    _session_survives(path, ['A mano, después', 'Roto \ud83d', 'Informe'])
+    json.loads(path.read_text(encoding='utf-8'))  # JSON válido
+
+
+def test_safe_json_reintenta_escapado_solo_si_hace_falta(tmp_path):
+    from utils.safe_json import load_json_safe, save_json_atomic
+    path = tmp_path / "datos.json"
+    assert save_json_atomic(path, {'nombre': 'ñandú'})
+    assert 'ñandú' in path.read_text(encoding='utf-8')  # legible, como siempre
+    assert save_json_atomic(path, {'nombre': 'ñandú \ud83d'})
+    assert load_json_safe(path) == ({'nombre': 'ñandú \ud83d'}, None)
+    assert not (tmp_path / "datos.json.tmp").exists()
+
+
+# ======================================================================
+# Controlador: salida y puerto ocupado
+# ======================================================================
+def test_salir_crea_las_tareas_que_quedaban_en_la_cola(build, monkeypatch):
+    """Lo que llegó entre el último repaso de la cola y la parada ya recibió
+    un 200: al salir se crea (sin refrescar la lista ni avisar)."""
+    from PySide6.QtWidgets import QApplication
+
+    from ui.controllers import app_controller
+    monkeypatch.setattr(QApplication.instance(), 'quit', lambda: None)
+    infos = []
+    monkeypatch.setattr(app_controller.toast, 'show_info',
+                        lambda win, msg, duration=0: infos.append(msg))
+    ctrl = build({'webhook_mode': 'local'}, real=True)
+    monkeypatch.setattr(ctrl.focus_mode, 'cleanup_system_blocks', lambda: False)
+    monkeypatch.setattr(ctrl.model, 'is_running', False)
+    ctrl.sync_enabled = False
+    assert _post(Config.WEBHOOK_PORT, {'name': 'Justo antes de salir', 'tags': ['n8n']})[0] == 200
+    ctrl.quit_with_farewell(farewell=False)
+    assert ctrl.webhook_server is None and ctrl.webhook_queue.empty()
+    assert [t['name'] for t in _webhook_tasks(ctrl)] == ['Justo antes de salir']
+    on_disk = DataHandler(ctrl.data_handler.filepath).get_tasks()
+    assert 'Justo antes de salir' in [t['name'] for t in on_disk]
+    assert not [m for m in infos if 'webhook' in m]
+
+
+def test_puerto_ocupado_al_arrancar_avisa_y_guardar_lo_reintenta(build, qtbot, monkeypatch):
+    """Antes: solo un print (el exe no tiene consola) y «Guardar» con el
+    mismo modo no reintentaba nunca."""
+    from ui.controllers import app_controller
+    warnings = []
+    monkeypatch.setattr(app_controller.toast, 'show_warning',
+                        lambda win, msg, duration=0: warnings.append(msg))
+    busy = socket.socket()  # otro programa con el puerto
+    try:
+        busy.bind(('127.0.0.1', 0))
+        busy.listen()
+        port = busy.getsockname()[1]
+        ctrl = build({'webhook_mode': 'local'}, real=True, port=port)
+        assert ctrl.webhook_server is None
+        # El aviso, cuando la ventana principal ya se ve
+        qtbot.waitUntil(lambda: len(warnings) == 1, timeout=3000)
+        assert str(port) in warnings[0]
+    finally:
+        busy.close()
+    # El otro programa soltó el puerto: «Guardar» sin cambios lo reintenta
+    ctrl.apply_settings(ctrl.data_handler.load_settings())
+    assert ctrl.webhook_server is not None
+    assert ctrl.webhook_server.address == ('127.0.0.1', port)
+    assert _post(port, {'name': 'Por fin'})[0] == 200
+    assert len(warnings) == 1
+
+
+def test_tras_fallar_el_puerto_al_guardar_guardar_otra_vez_lo_reintenta(build, monkeypatch):
+    from ui.controllers import app_controller
+    warnings = []
+    monkeypatch.setattr(app_controller.toast, 'show_warning',
+                        lambda win, msg, duration=0: warnings.append(msg))
+    ctrl = build({'webhook_mode': 'off'})
+    attempts = []
+
+    class BusyOnce(FakeWebhookServer):
+        def __init__(self, *args, **kwargs):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise OSError("puerto ocupado")
+            super().__init__(*args, **kwargs)
+    monkeypatch.setattr(webhook_server, 'WebhookServer', BusyOnce)
+    s = ctrl.data_handler.load_settings()
+    s['webhook_mode'] = 'local'
+    ctrl.apply_settings(s)
+    assert ctrl.webhook_server is None and len(warnings) == 1
+    ctrl.apply_settings(s)  # el otro programa ya lo soltó
+    assert len(attempts) == 2 and len(warnings) == 1
+    assert ctrl.webhook_server is FakeWebhookServer.instances[-1]
+    assert ctrl.webhook_server.started
+    ctrl.apply_settings(s)  # en marcha y sin cambios: nada
+    assert len(attempts) == 2
+
+
+# ======================================================================
+# conftest: ningún test escucha en el 8081
+# ======================================================================
+_LEFT_RUNNING = []
+
+
+def test_conftest_ningun_test_usa_el_puerto_de_la_app():
+    """conftest («# --- webhook en tests ---»): el controlador recibe un
+    servidor falso, el puerto por defecto es 0 (uno libre) y un servidor real
+    que el test deje en marcha se para al acabar (lo mira el siguiente)."""
+    assert Config.WEBHOOK_PORT == 0
+    assert webhook_server.WebhookServer is not WebhookServer  # el falso
+    ws = WebhookServer(queue.Queue(), Config.WEBHOOK_PORT)
+    ws.start()
+    assert ws.running and ws.address[1] not in (0, 8081)
+    _LEFT_RUNNING.append(ws)  # sin stop()
+
+
+def test_conftest_paro_el_servidor_que_quedo_en_marcha():
+    if not _LEFT_RUNNING:
+        pytest.skip("va detrás de test_conftest_ningun_test_usa_el_puerto_de_la_app")
+    ws = _LEFT_RUNNING.pop()
+    assert not ws.running and ws.server is None

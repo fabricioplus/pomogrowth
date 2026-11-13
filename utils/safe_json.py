@@ -14,6 +14,13 @@ import time
 logger = logging.getLogger("PomoGrowth")
 
 
+def _dump(tmp_path, data, ensure_ascii):
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=ensure_ascii)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def save_json_atomic(path, data, keep_backup=True):
     """Guarda `data` como JSON en `path` de forma atómica.
 
@@ -23,10 +30,16 @@ def save_json_atomic(path, data, keep_backup=True):
     path = os.fspath(path)
     tmp_path = f"{path}.tmp"
     try:
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
+        try:
+            _dump(tmp_path, data, ensure_ascii=False)
+        except UnicodeEncodeError as e:
+            # Un texto con un surrogate suelto ('\ud83d', de un emoji cortado)
+            # no se puede escribir en UTF-8 y, como sigue en memoria, haría
+            # fallar TODOS los guardados de la sesión. Escapado (\ud83d) es
+            # JSON válido que se vuelve a cargar igual
+            logger.warning("Texto no representable en UTF-8 al guardar %s (%s): "
+                           "se guarda escapado", path, e)
+            _dump(tmp_path, data, ensure_ascii=True)
         if keep_backup and os.path.exists(path):
             try:
                 shutil.copy2(path, f"{path}.bak")

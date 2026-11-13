@@ -203,7 +203,9 @@ class AppController(QObject):
         self.webhook_queue = queue.Queue()
         self.webhook_server = None
         self._webhook_config = ('off', '')  # (modo, clave) del servidor en marcha
-        self._start_webhook_server()
+        if not self._start_webhook_server():
+            # Puerto ocupado: el aviso, cuando se vea la ventana principal
+            QTimer.singleShot(0, self, self._warn_webhook_port_on_start)
         self._webhook_timer = QTimer(self)
         self._webhook_timer.setInterval(500)
         self._webhook_timer.timeout.connect(self._process_webhook_queue)
@@ -1028,24 +1030,58 @@ class AppController(QObject):
                 print(f"Al parar el servidor de webhooks: {e}")
 
     def _restart_webhook_server_if_changed(self, s: Dict[str, Any]) -> None:
-        """Al guardar Ajustes: si cambió el modo o la clave, para el servidor
-        y lo vuelve a arrancar con lo nuevo (en el mismo puerto)."""
-        if self._webhook_settings(s) == self._webhook_config:
+        """Al guardar Ajustes: si cambió el modo o, en 'lan', la clave, para
+        el servidor y lo vuelve a arrancar con lo nuevo (en el mismo puerto).
+        Sin servidor en un modo que lo pide (el puerto estaba ocupado al
+        arrancar o en el último intento), lo reintenta aunque nada cambiara."""
+        mode, key = self._webhook_settings(s)
+        old_mode, old_key = self._webhook_config
+        same = mode == old_mode and (mode != 'lan' or key == old_key)
+        if same and (self.webhook_server is not None or mode == 'off'):
             return
         self._stop_webhook_server()
         if not self._start_webhook_server(s):
-            toast.show_warning(self.window, f"No se pudo abrir el puerto {Config.WEBHOOK_PORT} "
-                                            "para recibir tareas: quizá lo usa otro programa",
-                               duration=4000)
+            self._warn_webhook_port_busy()
+
+    def apply_webhook_settings(self, s: Dict[str, Any]) -> None:
+        """«Recibir tareas» de unos ajustes que no pasan por «Guardar»
+        (Importar datos): el mismo rearranque, si cambiaron."""
+        self._restart_webhook_server_if_changed(s)
+
+    def _warn_webhook_port_busy(self) -> None:
+        toast.show_warning(self.window, f"No se pudo abrir el puerto {Config.WEBHOOK_PORT} "
+                                        "para recibir tareas: quizá lo usa otro programa",
+                           duration=4000)
+
+    def _warn_webhook_port_on_start(self, tries: int = 120) -> None:
+        """El aviso de que el puerto estaba ocupado al arrancar, cuando la
+        ventana principal ya se ve (launch() la muestra enseguida o tras el
+        splash del auto-sync, 45 s como mucho: se mira cada medio segundo
+        durante un minuto). Nada si entretanto «Guardar» abrió el puerto o
+        lo apagó, ni si la app se está cerrando."""
+        if (self._is_closing or self.webhook_server is not None
+                or self._webhook_config[0] == 'off'):
+            return
+        if self.window.isVisible():
+            self._warn_webhook_port_busy()
+        elif tries > 0:
+            QTimer.singleShot(500, self, lambda: self._warn_webhook_port_on_start(tries - 1))
 
     def _process_webhook_queue(self) -> None:
-        """Tareas recibidas por webhook (con el sync activado): SIEMPRE locales,
-        con solo su nombre y sus etiquetas (services/webhook_server.task_fields).
-        Lo demás que traiga el JSON (source, asana_id…) se descarta: un envío
-        no puede enlazar una tarea a Asana, donde la app escribiría con tu
-        token. Un elemento raro se salta y se siguen procesando los demás."""
-        if not self.sync_enabled:
-            return
+        """Tareas recibidas por webhook: SIEMPRE locales (no tocan Asana, así
+        que entran también con el sync apagado), con solo su nombre y sus
+        etiquetas (services/webhook_server.task_fields). Lo demás que traiga
+        el JSON (source, asana_id…) se descarta: un envío no puede enlazar
+        una tarea a Asana, donde la app escribiría con tu token."""
+        added = self._add_webhook_tasks()
+        if added:
+            self.refresh_task_list()
+            toast.show_info(self.window, "Tarea recibida por webhook" if added == 1
+                            else f"{added} tareas recibidas por webhook", duration=2000)
+
+    def _add_webhook_tasks(self) -> int:
+        """Crea las tareas que esperan en la cola del webhook y dice cuántas.
+        Un elemento raro se salta y se siguen procesando los demás."""
         from services.webhook_server import task_fields
         added = 0
         while True:
@@ -1062,10 +1098,7 @@ class AppController(QObject):
                 added += 1
             except Exception as e:
                 print(f"Tarea del webhook descartada: {e}")
-        if added:
-            self.refresh_task_list()
-            toast.show_info(self.window, "Tarea recibida por webhook" if added == 1
-                            else f"{added} tareas recibidas por webhook", duration=2000)
+        return added
 
     def send_data_to_n8n(self, payload: Dict[str, Any]) -> None:
         url = Config.N8N_WEBHOOK_URL
@@ -1474,6 +1507,9 @@ class AppController(QObject):
         self.asana.shutdown()
         self._webhook_timer.stop()
         self._stop_webhook_server()  # el puerto, libre para la siguiente instancia
+        # Lo que llegó hasta parar ya recibió su 200: se crea (sin refrescar
+        # la lista ni avisar)
+        self._add_webhook_tasks()
         if self.model.is_free:
             # Modo Libre: cerrar la sesión con su tramo y sus recompensas (el
             # comentario de Asana espera en la cola al siguiente arranque)

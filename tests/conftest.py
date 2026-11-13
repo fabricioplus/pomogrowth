@@ -101,3 +101,40 @@ def _ambiente_sin_reproductores_reales(monkeypatch):
     from tests.ambient_fakes import FakeVoice
     monkeypatch.setattr(ambient_service, "VOICE_FACTORY", FakeVoice)
     FakeVoice.created.clear()
+
+
+# --- webhook en tests ---
+# Ningún test escucha en el 8081 (el puerto de la app de verdad, que puede
+# estar abierta): el controlador recibe un servidor falso que no abre nada,
+# el puerto por defecto pasa a 0 (uno libre que elige el sistema) para los
+# tests que usan el servidor real (tests/test_webhook_seguro.py) y todo
+# servidor real que un test arranque se para al acabar ese test
+class _ServidorWebhookFalso:
+    def __init__(self, webhook_queue, port, mode='local', key='', host=None):
+        self.queue, self.port, self.mode, self.key = webhook_queue, port, mode, key
+        self.running = False
+
+    def start(self):
+        self.running = True
+
+    def stop(self):
+        self.running = False
+
+
+@pytest.fixture(autouse=True)
+def _webhook_sin_puerto_de_la_app(monkeypatch):
+    from core.config import Config
+    from services import webhook_server
+    real = webhook_server.WebhookServer
+    real_start = real.start
+    started = []
+
+    def start(self):
+        started.append(self)
+        real_start(self)
+    monkeypatch.setattr(real, "start", start)
+    monkeypatch.setattr(Config, "WEBHOOK_PORT", 0)
+    monkeypatch.setattr(webhook_server, "WebhookServer", _ServidorWebhookFalso)
+    yield
+    for server in started:
+        server.stop()
