@@ -12,6 +12,13 @@ cambios ni las tareas, y el usuario ve un texto por tipo (línea de estado +
 diálogo «Asana»). Ante un 429 o un 5xx el sync se repite solo, nunca antes
 del Retry-After que pidió Asana.
 
+Revisión F0 (encargo «asana»): un test por cada invariante del reintento; un
+sync cancelado que falla no abre el diálogo; el reintento que espera a un
+envío de la cola sigue siendo silencioso; el Retry-After se acota a una hora;
+un listado sin fin se corta a las 200 páginas; un fallo antes de salir a la
+red no atasca el sync; y la etiqueta de conexión dice qué pasa según el tipo
+de error.
+
 Todo pasa por el camino real (AsanaService → DataHandler → requests) contra
 la red falsa (tests/fakes/net.py, fixture `fake_net`): una petición sin ruta
 preparada (p. ej. verificar una tarea suelta) hace fallar el test.
@@ -22,6 +29,7 @@ Ejecutar desde la raíz del repositorio:
 import copy
 import json
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 from pathlib import Path
@@ -93,23 +101,12 @@ class _Senales:
         svc.connection_state.connect(self.online.append)
 
 
-# Servicios creados en el test en curso (ver _sin_reintentos_colgados)
-_SERVICIOS = []
-
-
-@pytest.fixture(autouse=True)
-def _sin_reintentos_colgados():
-    """Ningún reintento programado sobrevive al test: el AsanaService de un
-    test no se libera solo (su temporizador lo retiene) y un reintento que
-    venciera más tarde saldría a la red en medio de otro test."""
-    yield
-    while _SERVICIOS:
-        _SERVICIOS.pop().shutdown()
-
-
+# Ningún reintento programado sobrevive al test: el bloque «asana y config en
+# tests» de tests/conftest.py apaga al final de cada test los servicios
+# creados (uno no se libera solo y su reintento saldría a la red en medio de
+# otro test).
 def _service(dh: DataHandler, push: bool = True, delays=None) -> tuple:
     svc = AsanaService(dh)
-    _SERVICIOS.append(svc)
     svc.push_allowed = lambda: push
     if delays is not None:
         svc.RETRY_DELAYS_MS = delays
@@ -367,6 +364,279 @@ def test_el_retry_after_manda_sobre_un_reintento_ya_programado(qtbot, make_dh, f
     assert dh.pending_asana_ops_count() == 1   # el cambio sigue en cola
 
 
+# --- Invariantes del reintento (revisión F0, T1): un test por cada una ---
+def test_tras_un_reintento_silencioso_el_sync_manual_vuelve_a_avisar(qtbot, make_dh, fake_net):
+    """El modo silencioso es solo del reintento: sync() lo repone en cada
+    arranque. Tras un reintento que vuelve a fallar en silencio, un sync
+    manual que falla (token revocado) abre el diálogo otra vez."""
+    dh = make_dh(tasks=[])
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(500), FakeResponse(500), FakeResponse(401))
+    svc, seen = _service(dh, delays=(40, 120_000))
+    _run_sync(qtbot, svc)
+    qtbot.waitUntil(lambda: len(fake_net.calls) == 2 and not svc.busy, timeout=5000)
+    qtbot.wait(20)
+    assert len(seen.errors) == 1                      # el reintento falló en silencio
+    _run_sync(qtbot, svc)                             # sync manual: token revocado
+    assert seen.errors == ["Asana no responde bien (error 500). Se reintentará en 1 min.", AUTH]
+
+
+def test_tras_un_listado_correcto_el_reintento_vuelve_al_primer_retraso(qtbot, make_dh,
+                                                                        fake_net):
+    """Un listado que llega entero pone a cero los fallos del sync: la caída
+    siguiente vuelve a esperar RETRY_DELAYS_MS[0] (1 min), no el escalón
+    siguiente."""
+    dh = make_dh(tasks=[])
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(503), asana_page([_remote(GID_1, 'Informe')]),
+                 FakeResponse(503))
+    svc, seen = _service(dh, delays=(40, 120_000))
+    _run_sync(qtbot, svc)
+    qtbot.waitUntil(lambda: seen.finished == [1], timeout=5000)
+    qtbot.wait(20)
+    svc.RETRY_DELAYS_MS = (60_000, 120_000)
+    _run_sync(qtbot, svc)
+    assert svc._retry_timer.interval() == 60_000
+    assert seen.status[-1].endswith("Se reintentará en 1 min.")
+
+
+def test_un_sync_manual_sustituye_al_reintento_pendiente(qtbot, make_dh, fake_net):
+    """Un sync manual con un reintento del sync pendiente lo sustituye: si
+    después falla un envío de la cola, al vencer solo se reenvía la cola
+    (PUT), sin repetir el listado."""
+    dh = make_dh()
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(500),
+                 asana_page([_remote(GID_1, 'Informe'), _remote(GID_2, 'Llamar')]))
+    fake_net.put(ASANA_HOST, asana_path(f'/tasks/{GID_1}'), FakeResponse(503),
+                 {'data': {'gid': GID_1, 'completed': True}})
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)                 # 500: reintento del sync pendiente
+    assert svc.retry_scheduled
+    _run_sync(qtbot, svc)                 # el usuario sincroniza a mano: sale bien
+    qtbot.waitUntil(lambda: seen.finished == [2], timeout=5000)
+    qtbot.wait(20)
+    dh.update_task_status(1, True)
+    svc.push_pending()                    # PUT 503: reintento SOLO de la cola
+    qtbot.waitUntil(lambda: not svc.busy and svc.retry_scheduled, timeout=5000)
+    _expire_retry(qtbot, svc)
+    qtbot.waitUntil(lambda: not dh.has_pending_asana_ops() and not svc.busy, timeout=5000)
+    assert [c.method for c in fake_net.calls] == ['GET', 'GET', 'PUT', 'PUT']
+
+
+def test_un_retraso_que_no_cabe_en_el_temporizador_se_acota(qtbot, make_dh, fake_net):
+    """El temporizador de Qt es de 32 bits (ms): un retraso mayor se acota a
+    2**31-1 en vez de lanzar OverflowError dentro de _on_error (el usuario no
+    vería ni la línea de estado ni el diálogo)."""
+    dh = make_dh(tasks=[])
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(503))
+    svc, seen = _service(dh, delays=(2**31 + 5_000,))
+    _run_sync(qtbot, svc)
+    assert svc._retry_timer.interval() == 2**31 - 1
+    assert seen.status[-1].startswith("❌ Asana no responde bien (error 503).")
+    assert len(seen.errors) == 1
+
+
+def test_un_fallo_de_la_cola_no_adelanta_el_retry_after_del_sync(qtbot, make_dh, fake_net):
+    """Sync con 429 + Retry-After: 600 (reintento del sync a 10 min); después
+    un PUT de la cola con 429: el reintento ya programado para más tarde no
+    se adelanta a 1 min (el sync, con su GET, no se repite antes de lo que
+    pidió Asana)."""
+    dh = make_dh()
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(429, headers={'Retry-After': '600'}))
+    fake_net.put(ASANA_HOST, asana_path(f'/tasks/{GID_1}'), FakeResponse(429))
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)
+    assert svc._retry_timer.interval() == 600_000 and svc._retry_sync
+    dh.update_task_status(1, True)
+    svc.push_pending()
+    qtbot.waitUntil(lambda: not svc.busy and len(fake_net.calls) == 2, timeout=5000)
+    qtbot.wait(20)
+    assert svc._retry_sync
+    assert svc._retry_timer.remainingTime() > 590_000
+
+
+@pytest.mark.parametrize("value", ['1e306', '9' * 400, 'inf', '99999999'],
+                         ids=['1e306', '400-nueves', 'inf', '99999999'])
+def test_un_retry_after_desmesurado_se_acota_a_una_hora(qtbot, make_dh, fake_net, value):
+    """Un Retry-After absurdo espera como mucho una hora. Antes, '1e306'
+    acababa en OverflowError dentro de _on_error (estado atascado en
+    «Sincronizando Asana…», sin diálogo ni reintento) y uno grande pero
+    válido dejaba el reintento (y el de la cola) a ~25 días."""
+    dh = make_dh(tasks=[])
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(429, headers={'Retry-After': value}))
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)
+    message = "Asana pide esperar: demasiadas peticiones. Se reintentará en 60 min."
+    assert seen.errors == [message] and seen.status[-1] == f"❌ {message}"
+    assert svc._retry_timer.interval() == 3_600_000
+
+
+# =====================================================================
+# Sync cancelado, reintento diferido y fallos antes de salir a la red
+# =====================================================================
+def _con_compuerta(reply):
+    """Respuesta que espera a que el test abra la compuerta: la petición se
+    queda en vuelo mientras tanto."""
+    gate = threading.Event()
+
+    def wait_then_reply(call):
+        gate.wait(5)
+        return reply
+    return gate, wait_then_reply
+
+
+@pytest.mark.parametrize("reply", [FakeResponse(401), FakeResponse(503),
+                                   requests.ConnectionError("sin red (simulado)")],
+                         ids=['401', '503', 'sin-red'])
+def test_un_sync_cancelado_que_falla_no_abre_el_dialogo(qtbot, make_dh, fake_net, reply):
+    """El usuario apaga el switch (cancel) con el listado en vuelo y Asana
+    responde con un error: el sync acaba en «Sincronización cancelada.», sin
+    diálogo ni reintento. Antes, _on_fetched miraba el error antes que la
+    cancelación y abría el diálogo «Asana» de un sync que ya no se quería."""
+    dh = make_dh(tasks=[])
+    gate, slow = _con_compuerta(reply)
+    fake_net.get(ASANA_HOST, LIST, slow)
+    svc, seen = _service(dh)
+    svc.sync()
+    qtbot.waitUntil(lambda: len(fake_net.calls) == 1, timeout=5000)
+    svc.cancel()
+    gate.set()
+    qtbot.waitUntil(lambda: not svc.busy, timeout=5000)
+    qtbot.wait(20)
+    assert seen.errors == []
+    assert seen.status[-1] == "Sincronización cancelada."
+    assert not svc.retry_scheduled
+
+
+def test_un_sync_cancelado_que_revienta_no_abre_el_dialogo(qtbot, make_dh, fake_net,
+                                                          monkeypatch):
+    """Igual si el trabajo de red revienta fuera del listado (_on_sync_crashed):
+    las ops vuelven a la cola y no hay diálogo."""
+    dh = make_dh()
+    dh.update_task_status(1, True)
+    started, gate = threading.Event(), threading.Event()
+
+    def send_falla(ops, on_progress=None):
+        started.set()
+        gate.wait(5)
+        raise RuntimeError("fallo inesperado (simulado)")
+    monkeypatch.setattr(dh, 'send_asana_ops', send_falla)
+    svc, seen = _service(dh)
+    svc.sync()
+    qtbot.waitUntil(started.is_set, timeout=5000)
+    svc.cancel()
+    gate.set()
+    qtbot.waitUntil(lambda: not svc.busy, timeout=5000)
+    qtbot.wait(20)
+    assert seen.errors == []
+    assert seen.status[-1] == "Sincronización cancelada."
+    assert len(dh.take_asana_ops_for_push()) == 1      # liberada: ya no está en vuelo
+
+
+def test_apagar_y_encender_durante_un_429_deja_un_solo_dialogo(qtbot, make_dh, fake_net):
+    """Apagar y encender el switch con el listado en vuelo: el sync cancelado
+    recibe un 429 (Retry-After: 600) y no avisa; el nuevo, que arranca al
+    terminar aquel, también recibe el 429: un solo diálogo, el suyo, y su
+    reintento a los 600 s. Antes: dos diálogos seguidos."""
+    dh = make_dh(tasks=[])
+    gate = threading.Event()
+    first = []
+
+    def reply(call):
+        if not first:
+            first.append(call)
+            gate.wait(5)
+        return FakeResponse(429, headers={'Retry-After': '600'})
+    fake_net.get(ASANA_HOST, LIST, reply)
+    svc, seen = _service(dh)
+    svc.sync()
+    qtbot.waitUntil(lambda: len(fake_net.calls) == 1, timeout=5000)
+    svc.cancel()          # switch apagado…
+    svc.sync()            # …y encendido otra vez (sync_asana)
+    assert svc.sync_pending
+    gate.set()
+    qtbot.waitUntil(lambda: len(fake_net.calls) == 2 and not svc.busy, timeout=5000)
+    qtbot.wait(20)
+    assert seen.errors == ["Asana pide esperar: demasiadas peticiones. Se reintentará en 10 min."]
+    assert svc._retry_sync and svc._retry_timer.interval() == 600_000
+
+
+def _reintento_con_envio_en_vuelo(qtbot, make_dh, fake_net, manual_antes=False):
+    """Un sync falla con 500 (primer diálogo, reintento programado); después
+    sale un envío de la cola que tarda y el reintento vence con él en vuelo
+    (`manual_antes`: el usuario ya había pulsado sync durante el envío).
+    Devuelve (svc, seen, gate): el envío termina al abrir la compuerta."""
+    dh = make_dh()
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(500), FakeResponse(500))
+    gate, slow = _con_compuerta({'data': {'gid': GID_1, 'completed': True}})
+    fake_net.put(ASANA_HOST, asana_path(f'/tasks/{GID_1}'), slow)
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)
+    assert len(seen.errors) == 1 and svc._retry_sync
+    dh.update_task_status(1, True)
+    svc.push_pending()                    # el envío sale y tarda
+    assert svc.busy
+    if manual_antes:
+        svc.sync()                        # botón de sync con el envío en vuelo
+    _expire_retry(qtbot, svc)             # vence el reintento: espera al envío
+    assert svc.sync_pending
+    return svc, seen, gate
+
+
+def test_un_reintento_que_espera_a_un_envio_sigue_siendo_silencioso(qtbot, make_dh, fake_net):
+    """El reintento que tuvo que esperar a un envío de la cola sigue siendo el
+    reintento al arrancar: si vuelve a fallar, solo la línea de estado. Antes
+    se relanzaba como un sync normal y abría un segundo diálogo."""
+    svc, seen, gate = _reintento_con_envio_en_vuelo(qtbot, make_dh, fake_net)
+    gate.set()
+    qtbot.waitUntil(lambda: fake_net.methods().count('GET') == 2 and not svc.busy,
+                    timeout=5000)
+    qtbot.wait(20)
+    assert len(seen.errors) == 1
+    assert seen.status[-1] == "❌ Asana no responde bien (error 500). Se reintentará en 2 min."
+
+
+@pytest.mark.parametrize("manual_antes", [True, False],
+                         ids=['manual-antes-del-reintento', 'manual-despues'])
+def test_si_ademas_se_pidio_un_sync_a_mano_gana_el_que_avisa(qtbot, make_dh, fake_net,
+                                                            manual_antes):
+    """Si mientras esperaba el usuario pidió además un sync a mano (antes o
+    después de vencer el reintento), el sync diferido es el suyo: si falla,
+    abre el diálogo."""
+    svc, seen, gate = _reintento_con_envio_en_vuelo(qtbot, make_dh, fake_net, manual_antes)
+    if not manual_antes:
+        svc.sync()                        # botón de sync con el envío en vuelo
+    gate.set()
+    qtbot.waitUntil(lambda: fake_net.methods().count('GET') == 2 and not svc.busy,
+                    timeout=5000)
+    qtbot.wait(20)
+    assert len(seen.errors) == 2
+
+
+def test_un_fallo_inesperado_antes_de_salir_a_la_red_no_atasca_el_sync(
+        qtbot, make_dh, fake_net, monkeypatch):
+    """Si algo revienta en sync() antes de lanzar el trabajo de red (un
+    ajuste raro, un dato inesperado…), el sync termina por el camino de
+    error: las ops tomadas vuelven a la cola, el usuario lo ve y el
+    siguiente sync arranca. Antes: «Sincronización ya en curso…» para
+    siempre."""
+    dh = make_dh()
+    dh.update_task_status(1, True)
+    real = dh.asana_gids_with_pending
+    monkeypatch.setattr(dh, 'asana_gids_with_pending', lambda field: 1 / 0)
+    svc, seen = _service(dh)
+    svc.sync()
+    assert not svc.busy and fake_net.calls == []
+    assert seen.errors == ["Error durante la sincronización: division by zero"]
+    assert seen.status[-1] == "❌ Error durante la sincronización: division by zero"
+    monkeypatch.setattr(dh, 'asana_gids_with_pending', real)
+    fake_net.get(ASANA_HOST, LIST, asana_page([_remote(GID_1, 'Informe', completed=True),
+                                               _remote(GID_2, 'Llamar')]))
+    fake_net.put(ASANA_HOST, asana_path(f'/tasks/{GID_1}'),
+                 {'data': {'gid': GID_1, 'completed': True}})
+    _run_sync(qtbot, svc)
+    assert fake_net.methods() == ['PUT', 'GET']        # la op liberada viaja
+    assert seen.finished == [2] and not dh.has_pending_asana_ops()
+
+
 # =====================================================================
 # Otros fetch de Asana: proyectos (Ajustes) y resumen de pendientes
 # =====================================================================
@@ -436,6 +706,43 @@ def test_la_404_de_una_tarea_suelta_sigue_siendo_borrada(make_dh, fake_net):
     assert dh.fetch_asana_task_state(GID_2) == {'exists': False, 'completed': None}
 
 
+def test_elementos_que_no_son_tareas_en_data(make_dh, fake_net):
+    """Una lista 'data' con elementos que no son objetos ({'data': [1, 'x']})
+    es una respuesta que no se entiende, no un listado."""
+    dh = make_dh()
+    fake_net.get(ASANA_HOST, LIST, {'data': [1, 'x']})
+    with pytest.raises(AsanaFetchError) as caught:
+        dh._fetch_asana_assigned('A', 'W')
+    assert caught.value.kind == 'bad_response'
+
+
+def test_un_listado_que_nunca_acaba_se_corta(qtbot, make_dh, fake_net):
+    """Un next_page que no se acaba nunca (Asana o un proxy que repite el
+    offset) no deja el sync dando vueltas para siempre: tras 200 páginas
+    (20 000 tareas a 100 por página) el listado se da por ilegible
+    (bad_response) y el sync termina en error sin fusionar nada."""
+    dh = make_dh(tasks=[])
+    served = []
+
+    def endless(call):
+        served.append(call.param('offset'))
+        if len(served) > 1000:
+            raise AssertionError("el listado no se corta nunca")
+        return asana_page([_remote(f'13{len(served):014d}', f"Tarea {len(served)}")],
+                          next_offset=f"o{len(served)}")
+    fake_net.get(ASANA_HOST, LIST, endless)
+    with pytest.raises(AsanaFetchError) as caught:
+        dh._fetch_asana_assigned('A', 'W')
+    assert caught.value.kind == 'bad_response'
+    assert len(served) == 200
+    served.clear()
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)
+    assert len(served) == 200
+    assert seen.errors == [BAD_JSON] and seen.finished == []
+    assert dh.get_tasks() == []
+
+
 # =====================================================================
 # Piezas de core/asana_errors.py
 # =====================================================================
@@ -462,6 +769,23 @@ def test_retry_after():
     assert parse_retry_after(past) == 0
 
 
+def test_retry_after_acotado_y_sin_excepciones():
+    """Revisión F0: el Retry-After se acota a [0, 3600] s y nunca lanza. Un
+    infinito o un número enorme cuenta como el tope (antes, '1e306' pasaba
+    tal cual y acababa en OverflowError al programar el reintento); una
+    fecha imposible, como no dicha."""
+    assert parse_retry_after('1e306') == 3600
+    assert parse_retry_after('9' * 400) == 3600            # float: inf
+    assert parse_retry_after('inf') == 3600
+    assert parse_retry_after('99999999') == 3600
+    assert parse_retry_after('-inf') == 0
+    assert parse_retry_after('3600') == 3600
+    far = format_datetime(datetime.now(timezone.utc) + timedelta(days=30), usegmt=True)
+    assert parse_retry_after(far) == 3600
+    assert parse_retry_after('Thu, 01 Jan 99999999999 00:00:00 GMT') is None  # OverflowError
+    assert parse_retry_after('Mon, 31 Feb 2026 10:00:00 GMT') is None
+
+
 def test_tipo_desconocido_no_se_admite():
     with pytest.raises(ValueError):
         AsanaFetchError('otro')
@@ -472,8 +796,10 @@ def test_tipo_desconocido_no_se_admite():
 # =====================================================================
 @pytest.fixture
 def make_ctrl(qtbot, tmp_path, monkeypatch):
+    from core.config import Config
     from ui.theme import fonts
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Config, "WEBHOOK_PORT", 0)   # «Recibir tareas»: un puerto libre
     fonts.init_fonts()
     built = []
 
@@ -531,3 +857,50 @@ def test_ajustes_cargar_proyectos_muestra_el_error(make_ctrl, qtbot, fake_net):
     assert dlg.projects_status.text() == f"Error cargando proyectos: {AUTH}"
     assert dlg.projects_status._kind == 'error'
     dlg.reject()
+
+
+@pytest.mark.parametrize("reply, label", [
+    (FakeResponse(401), "● Asana: revisa el token"),
+    (FakeResponse(403), "● Asana: revisa la configuración"),
+    (FakeResponse(404), "● Asana: revisa la configuración"),
+    (FakeResponse(429, headers={'Retry-After': '30'}), "● Asana no responde"),
+    (FakeResponse(503), "● Asana no responde"),
+    (requests.ConnectionError, "● Sin conexión con Asana"),
+], ids=['401', '403', '404', '429', '503', 'sin-red'])
+def test_la_etiqueta_de_conexion_dice_lo_que_pasa(make_ctrl, qtbot, fake_net, monkeypatch,
+                                                 reply, label):
+    """La etiqueta junto al switch dice algo cierto según el tipo de error
+    del listado (antes, siempre «● Sin conexión con Asana», también con el
+    token revocado o el workspace mal puesto) y vuelve a «● Asana conectado»
+    con el siguiente sync correcto."""
+    from ui.dialogs import branded_dialogs
+    monkeypatch.setattr(branded_dialogs, "info", lambda *args, **kwargs: None)
+    fake_net.get(ASANA_HOST, LIST, reply,
+                 asana_page([_remote(GID_1, 'Informe'), _remote(GID_2, 'Llamar')]))
+    ctrl = make_ctrl()
+    connection = ctrl.timer_panel.connection_label
+    ctrl.sync_asana()
+    qtbot.waitUntil(lambda: not ctrl.asana.busy, timeout=5000)
+    qtbot.wait(50)
+    assert connection.text() == label
+    ctrl.sync_asana()
+    qtbot.waitUntil(lambda: len(fake_net.calls) == 2 and not ctrl.asana.busy, timeout=5000)
+    qtbot.wait(50)
+    assert connection.text() == "● Asana conectado"
+
+
+def test_un_envio_sin_red_tras_un_401_dice_sin_conexion(qtbot, make_dh, fake_net):
+    """El tipo que lee la etiqueta es el del ÚLTIMO error: un envío de la cola
+    que se queda sin red después de un 401 del listado ya no es «revisa el
+    token»."""
+    dh = make_dh()
+    fake_net.get(ASANA_HOST, LIST, FakeResponse(401))
+    fake_net.put(ASANA_HOST, asana_path(f'/tasks/{GID_1}'), requests.ConnectionError)
+    svc, seen = _service(dh)
+    _run_sync(qtbot, svc)
+    assert svc.last_error_kind == 'auth'
+    dh.update_task_status(1, True)
+    svc.push_pending()
+    qtbot.waitUntil(lambda: not svc.busy, timeout=5000)
+    assert seen.online == [False, False]
+    assert svc.last_error_kind == 'network'

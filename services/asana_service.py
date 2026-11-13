@@ -39,6 +39,15 @@ def _minutos(ms: int) -> str:
     return f"{max(1, math.ceil(ms / 60_000))} min"
 
 
+def _conexiones(settings) -> list:
+    """Las conexiones de Asana que son un dict: una entrada que no lo es
+    (JSON editado a mano o backup raro) se ignora, nunca revienta."""
+    connections = settings.get('asana_connections')
+    if not isinstance(connections, list):
+        return []
+    return [c for c in connections if isinstance(c, dict)]
+
+
 class AsanaService(QObject):
     progress = Signal(float, str)      # fracción 0..1, texto
     status = Signal(str)               # línea de estado del sync
@@ -73,6 +82,14 @@ class AsanaService(QObject):
         # El sync en curso lo lanzó el reintento: si vuelve a fallar, solo
         # la línea de estado (sin otro diálogo cada pocos minutos)
         self._quiet_errors = False
+        # El sync que espera turno (_sync_requested) es el reintento: al
+        # arrancar sigue siendo silencioso. Un sync manual pedido gana
+        self._deferred_retry = False
+        # Tipo del último error que dejó a Asana sin conexión (el `kind` de
+        # AsanaFetchError; 'network' si un envío de la cola no tuvo red;
+        # None si fue otro fallo): el controlador elige el texto de la
+        # etiqueta de conexión
+        self.last_error_kind: Optional[str] = None
         # El controlador lo sustituye por su criterio (switch de sync +
         # integración activa): sin permiso, la cola espera
         self.push_allowed = lambda: True
@@ -108,6 +125,7 @@ class AsanaService(QObject):
         permitido."""
         self._cancelled = True
         self._sync_requested = False
+        self._deferred_retry = False
         self._retry_sync = False
 
     def shutdown(self) -> None:
@@ -117,6 +135,7 @@ class AsanaService(QObject):
         self._retry_timer.stop()
         self._retry_sync = False
         self._sync_requested = False
+        self._deferred_retry = False
         self._push_requested = False
 
     def validate_settings(self) -> Optional[str]:
@@ -124,7 +143,7 @@ class AsanaService(QObject):
         settings = self.data_handler.load_settings()
         pat = (settings.get('asana_pat') or '').strip()
         assignee = (settings.get('asana_assignee_gid') or '').strip()
-        connections = settings.get('asana_connections') or []
+        connections = _conexiones(settings)
         workspace = (settings.get('asana_workspace_gid') or '').strip()
         if not pat:
             return "Falta el PAT de Asana en Configuración."
@@ -185,6 +204,7 @@ class AsanaService(QObject):
         if summary['failed']:
             self._schedule_retry()
             if summary['offline']:
+                self.last_error_kind = 'network'
                 self.connection_state.emit(False)
             if summary['auth']:
                 self.status.emit(f"⚠ Asana rechazó el token (HTTP 401): revisa el PAT "
@@ -233,15 +253,23 @@ class AsanaService(QObject):
                 return
         self.push_pending()
 
+    def _defer_sync(self, retry: bool) -> None:
+        """Pide un sync para cuando termine el trabajo en curso, conservando
+        su modo (`retry`, el del reintento: silencioso). Si ya había uno
+        manual pedido, gana el que avisa."""
+        self._deferred_retry = retry and (self._deferred_retry or not self._sync_requested)
+        self._sync_requested = True
+
     def _run_deferred(self) -> None:
         """Al terminar un trabajo de red, lanza el que quedó esperando."""
         if self.busy or self._closing:
             return
         if self._sync_requested:
             self._sync_requested = False
+            retry, self._deferred_retry = self._deferred_retry, False
             # Pudo apagarse el switch mientras esperaba
             if self.push_allowed():
-                self.sync()
+                self.sync(retry=retry)
         elif self._push_requested:
             self._push_requested = False
             self.push_pending()
@@ -261,7 +289,7 @@ class AsanaService(QObject):
             if self._cancelled:
                 # Se apagó y se volvió a encender el switch durante un sync:
                 # el cancelado termina y este arranca después
-                self._sync_requested = True
+                self._defer_sync(retry)
                 return
             self.status.emit("Sincronización ya en curso…")
             return
@@ -272,7 +300,7 @@ class AsanaService(QObject):
             return
         if self._pushing:
             # Un envío de la cola está en vuelo: el sync arranca al terminar
-            self._sync_requested = True
+            self._defer_sync(retry)
             self.status.emit("Sincronizando Asana…")
             return
         self._in_progress = True
@@ -281,24 +309,33 @@ class AsanaService(QObject):
         self._push_requested = False  # el sync envía la cola entera
         self._retry_timer.stop()
         self._retry_sync = False      # este sync es el reintento (o lo sustituye)
-        self.sync_started.emit()
-        self.status.emit("Sincronizando Asana…")
-        self.progress.emit(0.05, "Conectando con Asana…")
+        ops = []
+        try:
+            self.sync_started.emit()
+            self.status.emit("Sincronizando Asana…")
+            self.progress.emit(0.05, "Conectando con Asana…")
 
-        settings = self.data_handler.load_settings()
-        assignee = settings.get('asana_assignee_gid', '').strip()
-        workspace = settings.get('asana_workspace_gid', '').strip()
-        project = settings.get('asana_project_gid', '').strip() or None
-        include_completed = bool(settings.get('asana_include_completed', False))
-        connections = settings.get('asana_connections') or []
-        # Con proyectos marcados: traer también las propias sin proyecto
-        include_no_project = bool(settings.get('asana_include_no_project', False))
-        ops = self.data_handler.take_asana_ops_for_push() if self.push_allowed() else []
-        # Calculado aquí (hilo de UI): el hilo de red no lee la cola
-        skip_verify = self.data_handler.asana_gids_with_pending('completed')
-        # Las ya enlazadas llegan aunque no pasen el filtro de proyectos
-        linked = {str(t['asana_id']) for t in self.data_handler.get_tasks()
-                  if t.get('source') == 'asana' and t.get('asana_id')}
+            # Un null en el JSON cuenta como vacío (igual que en validate_settings)
+            settings = self.data_handler.load_settings()
+            assignee = (settings.get('asana_assignee_gid') or '').strip()
+            workspace = (settings.get('asana_workspace_gid') or '').strip()
+            project = (settings.get('asana_project_gid') or '').strip() or None
+            include_completed = bool(settings.get('asana_include_completed', False))
+            connections = _conexiones(settings)
+            # Con proyectos marcados: traer también las propias sin proyecto
+            include_no_project = bool(settings.get('asana_include_no_project', False))
+            ops = self.data_handler.take_asana_ops_for_push() if self.push_allowed() else []
+            # Calculado aquí (hilo de UI): el hilo de red no lee la cola
+            skip_verify = self.data_handler.asana_gids_with_pending('completed')
+            # Las ya enlazadas llegan aunque no pasen el filtro de proyectos
+            linked = {str(t['asana_id']) for t in self.data_handler.get_tasks()
+                      if t.get('source') == 'asana' and t.get('asana_id')}
+        except Exception as e:
+            # Nada puede dejar el servicio «Sincronización ya en curso…» para
+            # siempre: las ops vuelven a la cola y termina por el camino de error
+            traceback.print_exc()
+            self._on_sync_crashed(ops, e)
+            return
 
         def push_progress(i: int, n: int) -> None:
             self.progress.emit(0.05 + 0.10 * (i / max(1, n)),
@@ -351,22 +388,34 @@ class AsanaService(QObject):
                 traceback.print_exc()
                 return pushed, None, e
 
-        run_async(job, self._on_fetched, lambda e: self._on_sync_crashed(ops, e))
+        try:
+            run_async(job, self._on_fetched, lambda e: self._on_sync_crashed(ops, e))
+        except Exception as e:
+            traceback.print_exc()
+            self._on_sync_crashed(ops, e)
 
     # ---- de vuelta en el hilo de UI ----
     def _on_sync_crashed(self, ops, e) -> None:
         self.data_handler.release_asana_ops(ops)
+        if self._cancelled:
+            # Nadie espera ya este sync: ni diálogo ni reintento
+            self._end_sync()
+            self.status.emit("Sincronización cancelada.")
+            return
         self._on_error(e)
 
     def _on_fetched(self, result) -> None:
         pushed, fetched, fetch_error = result
+        # Lo enviado cuenta aunque el sync se cancelara o el listado fallara
         self._apply_push(pushed, announce=False)
-        if fetch_error is not None:
-            self._on_error(fetch_error)
-            return
         if self._cancelled:
+            # Antes que el error: un sync cancelado no abre el diálogo ni
+            # programa su reintento (el que se pidió después arranca solo)
             self._end_sync()
             self.status.emit("Sincronización cancelada.")
+            return
+        if fetch_error is not None:
+            self._on_error(fetch_error)
             return
         tasks, deleted_gids, completed_gids, had_filter = fetched
         self._sync_retry_failures = 0   # el listado llegó entero
@@ -433,6 +482,7 @@ class AsanaService(QObject):
 
     def _on_error(self, e) -> None:
         self._end_sync()
+        self.last_error_kind = e.kind if isinstance(e, AsanaFetchError) else None
         self.connection_state.emit(False)
         if isinstance(e, AsanaFetchError):
             msg = self._fetch_error_text(e)

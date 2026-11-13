@@ -23,6 +23,11 @@ FETCH_ERROR_KINDS = ('auth', 'forbidden', 'not_found', 'rate_limit', 'server',
 
 _DEFAULT_HINT = "Revisa la conexión en ⚙ Configuración → Asana."
 
+# Lo más que se espera por un Retry-After (s): Asana pide pocos segundos; un
+# valor absurdo (o una fecha muy lejana) no puede dejar el reintento del sync
+# (ni el de la cola, que comparte temporizador) parado durante días
+MAX_RETRY_AFTER_S = 3600.0
+
 
 def kind_for_status(code: int) -> str:
     """Tipo de error de una respuesta HTTP que no es el 200 esperado."""
@@ -42,8 +47,10 @@ def kind_for_status(code: int) -> str:
 
 
 def parse_retry_after(value: Any) -> Optional[float]:
-    """Segundos de la cabecera Retry-After (un número o una fecha HTTP), o
-    None si no viene o no se entiende. Nunca negativo."""
+    """Segundos de la cabecera Retry-After (un número o una fecha HTTP),
+    acotados a [0, MAX_RETRY_AFTER_S], o None si no viene o no se entiende.
+    Nunca lanza: un número enorme (o infinito) cuenta como el tope y una
+    fecha pasada, como 0."""
     if value is None:
         return None
     text = str(value).strip()
@@ -54,16 +61,16 @@ def parse_retry_after(value: Any) -> Optional[float]:
     except ValueError:
         try:
             when = parsedate_to_datetime(text)
-        except (TypeError, ValueError, IndexError):
+            if when is None:
+                return None
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, IndexError, OverflowError):
             return None
-        if when is None:
-            return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        seconds = (when - datetime.now(timezone.utc)).total_seconds()
-    if seconds != seconds or seconds in (float('inf'), float('-inf')):  # NaN, inf
+    if seconds != seconds:  # NaN
         return None
-    return max(0.0, seconds)
+    return min(max(0.0, seconds), MAX_RETRY_AFTER_S)
 
 
 def default_message(kind: str, status: Optional[int] = None, target: str = '',

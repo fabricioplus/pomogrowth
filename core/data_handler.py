@@ -1620,13 +1620,19 @@ class DataHandler:
                                   detail=f"se esperaba un objeto, llegó {type(body).__name__}")
         return body
 
+    # Tope de páginas de un listado (a 100 por página, 20 000 elementos): un
+    # next_page que no se acaba nunca (Asana o un proxy que repite el offset)
+    # no puede dejar el sync dando vueltas para siempre
+    ASANA_MAX_PAGES = 200
+
     def _asana_get_all(self, url: str, headers: Dict[str, str], params: Dict[str, Any],
                        timeout: float, target: str = '', hint: str = '') -> List[Dict[str, Any]]:
         """Todas las páginas de un listado (siguiendo next_page.offset, en el
         mismo dict de params) o AsanaFetchError: una página que falla invalida
-        el listado entero, nunca se devuelve a medias."""
+        el listado entero, nunca se devuelve a medias. Pasado el tope de
+        páginas, bad_response."""
         results: List[Dict[str, Any]] = []
-        while True:
+        for _ in range(self.ASANA_MAX_PAGES):
             body = self._asana_get_json(url, headers, params, timeout, target, hint)
             data = body.get('data')
             if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
@@ -1638,6 +1644,9 @@ class DataHandler:
             if not offset:
                 return results
             params["offset"] = offset
+        print(f"Asana: el listado ({url}) no se acaba tras {self.ASANA_MAX_PAGES} páginas")
+        raise AsanaFetchError('bad_response', 200, target=target, hint=hint,
+                              detail=f"más de {self.ASANA_MAX_PAGES} páginas (next_page sin fin)")
 
     def fetch_asana_tasks_for_assignee(self, assignee_gid: str, workspace_gid: str, project_gid: Optional[str] = None, include_completed: bool = False,
                                        include_no_project: bool = False,
@@ -1887,6 +1896,8 @@ class DataHandler:
         # workspace → proyectos marcados (None: una conexión sin proyecto, todo)
         by_ws: Dict[str, Optional[Set[str]]] = {}
         for c in connections:
+            if not isinstance(c, dict):
+                continue  # JSON editado a mano o backup raro: se ignora
             ws = (c.get('workspace_gid') or '').strip()
             pr = (c.get('project_gid') or '').strip() or None
             if not ws:

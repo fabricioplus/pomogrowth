@@ -853,13 +853,24 @@ class AppController(QObject):
                               and not self.data_handler.has_pending_asana_ops()
                               and self.timer_panel.set_sync_status(""))
 
+    # Etiqueta de conexión según el tipo del último error de Asana (sin él,
+    # o sin red, «● Sin conexión con Asana»)
+    _ASANA_OFFLINE_LABELS = {
+        'auth': "● Asana: revisa el token",
+        'forbidden': "● Asana: revisa la configuración",
+        'not_found': "● Asana: revisa la configuración",
+        'rate_limit': "● Asana no responde",
+        'server': "● Asana no responde",
+    }
+
     def _on_connection_state(self, online: bool) -> None:
         t = tokens()
         if online:
             self.timer_panel.connection_label.setText("● Asana conectado")
             self.timer_panel.connection_label.setStyleSheet(f"color: {t.accent};")
         else:
-            self.timer_panel.connection_label.setText("● Sin conexión con Asana")
+            self.timer_panel.connection_label.setText(self._ASANA_OFFLINE_LABELS.get(
+                self.asana.last_error_kind, "● Sin conexión con Asana"))
             self.timer_panel.connection_label.setStyleSheet(f"color: {t.danger};")
             self.timer_panel.set_sync_state('offline' if self.sync_enabled else 'off')
 

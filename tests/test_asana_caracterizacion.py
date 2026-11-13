@@ -78,24 +78,14 @@ def make_dh(tmp_path, monkeypatch):
     return build
 
 
-_SERVICIOS = []   # los de _Senales, para apagarlos al terminar cada test
-
-
-@pytest.fixture(autouse=True)
-def _sin_reintentos_colgados():
-    """Desde el encargo B1, un listado con 429/5xx programa el reintento del
-    sync (60 s): el servicio del test no se libera solo, así que se apaga
-    aquí para que ese reintento no salga a la red en medio de otro test."""
-    yield
-    while _SERVICIOS:
-        _SERVICIOS.pop().shutdown()
-
-
+# Desde el encargo B1, un listado con 429/5xx programa el reintento del sync
+# (60 s): el bloque «asana y config en tests» de tests/conftest.py apaga al
+# final de cada test los servicios creados, para que ese reintento no salga
+# a la red en medio de otro test.
 class _Senales:
     """Lo que el servicio cuenta a la UI durante un sync."""
 
     def __init__(self, svc: AsanaService):
-        _SERVICIOS.append(svc)
         self.status, self.finished, self.errors = [], [], []
         self.progress, self.online = [], []
         svc.status.connect(self.status.append)
@@ -662,32 +652,58 @@ def test_sync_con_ajustes_invalidos_avisa_y_no_sale_a_la_red(qtbot, make_dh, fak
     assert dh.pending_asana_ops_count() == 1
 
 
-def test_conexion_que_no_es_un_dict_revienta_la_validacion(make_dh):
-    """Comportamiento actual, posible bug: una entrada de asana_connections
-    que no es un dict (JSON editado a mano o backup raro) lanza
-    AttributeError en validate_settings (services/asana_service.py:106,
-    c.get) en vez de dar un mensaje."""
+@pytest.mark.parametrize("connections, workspace, message", [
+    (['W'], '', "Debes indicar Workspace GID (o configurar conexiones) en Configuración."),
+    (['W', 7, None], 'W', None),
+    ([None, {'workspace_gid': 'W2'}], '', None),
+    ({'workspace_gid': 'W'}, '', "Debes indicar Workspace GID (o configurar conexiones) "
+                                 "en Configuración."),
+], ids=['texto', 'basura-con-workspace', 'una-buena', 'dict-en-vez-de-lista'])
+def test_conexion_que_no_es_un_dict_se_ignora(make_dh, connections, workspace, message):
+    """CAMBIADO A PROPÓSITO en el encargo «asana» de la revisión F0 (antes:
+    test_conexion_que_no_es_un_dict_revienta_la_validacion, que fijaba el
+    AttributeError de validate_settings con una entrada de
+    asana_connections que no es un dict: JSON editado a mano o backup raro).
+    Ahora esas entradas se ignoran, nunca una excepción: sin ninguna
+    conexión válida manda el workspace global."""
     svc = AsanaService(make_dh(settings={'asana_pat': 'p', 'asana_assignee_gid': 'A',
-                                         'asana_connections': ['W']}))
-    with pytest.raises(AttributeError):
-        svc.validate_settings()
+                                         'asana_workspace_gid': workspace,
+                                         'asana_connections': connections}))
+    assert svc.validate_settings() == message
 
 
-def test_workspace_null_con_conexiones_pasa_la_validacion_y_atasca_el_sync(make_dh, fake_net):
-    """Comportamiento actual, posible bug: validate_settings tolera None
-    (`or ''`, services/asana_service.py:100), pero sync() hace
-    settings.get('asana_workspace_gid', '').strip() (:230; igual
-    asana_project_gid en :231) y con un null revienta con AttributeError
-    DESPUÉS de poner _in_progress=True (:220): el servicio queda `busy` para
-    siempre y cada sync posterior solo dice «Sincronización ya en curso…»."""
-    dh = make_dh(settings={'asana_pat': 'p', 'asana_assignee_gid': 'A',
-                           'asana_workspace_gid': None,
-                           'asana_connections': [{'workspace_gid': 'W'}]})
-    svc = AsanaService(dh)
-    seen = _Senales(svc)
+def test_conexiones_que_no_son_un_dict_no_rompen_el_sync(qtbot, make_dh, fake_net):
+    """El sync tampoco las recorre: con ['W', 7, None] y el workspace global,
+    lista ese workspace como sin conexiones (antes: AttributeError en
+    validate_settings y, sin él, en el hilo de red)."""
+    dh = make_dh(settings={**CONFIGURED, 'asana_connections': ['W', 7, None]})
+    fake_net.get(ASANA_HOST, LIST, asana_page([_remote(GID_VIVA, 'Una')]))
+    _svc, seen = _sync(qtbot, dh)
+    assert [c.param('workspace') for c in fake_net.calls] == ['W']
+    assert seen.errors == [] and seen.finished == [1]
+
+
+@pytest.mark.parametrize("settings", [
+    {'asana_workspace_gid': None, 'asana_connections': [{'workspace_gid': 'W'}]},
+    {'asana_workspace_gid': 'W', 'asana_project_gid': None},
+], ids=['workspace-null-con-conexiones', 'proyecto-null'])
+def test_workspace_null_con_conexiones_sincroniza_sin_atascarse(qtbot, make_dh, fake_net,
+                                                                settings):
+    """CAMBIADO A PROPÓSITO en el encargo «asana» de la revisión F0 (antes:
+    test_workspace_null_con_conexiones_pasa_la_validacion_y_atasca_el_sync,
+    que fijaba el fallo). sync() leía settings.get('asana_workspace_gid',
+    '').strip() (igual asana_project_gid) y con un null reventaba con
+    AttributeError DESPUÉS de poner _in_progress=True: el servicio quedaba
+    `busy` para siempre y cada sync posterior solo decía «Sincronización ya
+    en curso…». Ahora un null cuenta como vacío, igual que en
+    validate_settings: el sync sale a la red, termina y el siguiente también."""
+    dh = make_dh(settings={'asana_pat': 'p', 'asana_assignee_gid': 'A', **settings})
+    fake_net.get(ASANA_HOST, LIST, asana_page([]))
+    svc, seen = _sync(qtbot, dh)
     assert svc.validate_settings() is None
-    with pytest.raises(AttributeError):
-        svc.sync()
-    assert svc.busy and fake_net.calls == []
+    assert [c.param('workspace') for c in fake_net.calls] == ['W']
+    assert seen.errors == [] and seen.finished == [0]
     svc.sync()
-    assert seen.status[-1] == "Sincronización ya en curso…"
+    qtbot.waitUntil(lambda: not svc.busy, timeout=5000)
+    assert seen.finished == [0, 0]
+    assert "Sincronización ya en curso…" not in seen.status

@@ -138,3 +138,35 @@ def _webhook_sin_puerto_de_la_app(monkeypatch):
     yield
     for server in started:
         server.stop()
+
+
+# --- asana y config en tests ---
+@pytest.fixture(autouse=True)
+def _servicios_asana_apagados(monkeypatch):
+    """Cada AsanaService creado durante el test se apaga (shutdown) al
+    terminar: uno que ya sincronizó no se libera solo (su temporizador lo
+    retiene) y un reintento que venciera más tarde saldría a la red en medio
+    de otro test."""
+    from services.asana_service import AsanaService
+    creados = []
+    init = AsanaService.__init__
+
+    def init_anotado(self, *args, **kwargs):
+        init(self, *args, **kwargs)
+        creados.append(self)
+    monkeypatch.setattr(AsanaService, "__init__", init_anotado)
+    yield
+    for svc in creados:
+        try:
+            svc.shutdown()
+        except RuntimeError:
+            pass   # el objeto de Qt ya se destruyó (con su ventana): nada que parar
+
+
+@pytest.fixture(autouse=True)
+def _config_n8n_restaurada(monkeypatch):
+    """Config.N8N_WEBHOOK_URL es de clase: el DataHandler y el controlador
+    (al arrancar y al guardar Ajustes) la escriben; al terminar el test
+    vuelve a su valor."""
+    from core.config import Config
+    monkeypatch.setattr(Config, "N8N_WEBHOOK_URL", Config.N8N_WEBHOOK_URL)
