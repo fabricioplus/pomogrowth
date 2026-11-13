@@ -125,7 +125,7 @@ bloqueados.
 
 **Botones**:
 
-- Principal: **Descargar para Windows** · debajo, en pequeño: «Instalador · 75,8 MB · v1.0»
+- Principal: **Descargar para Windows** · debajo, en pequeño: «Instalador · 75,8 MB · v1.0.1»
 - Secundario: **Ver en GitHub** (con el icono de estrella: «Dar estrella»)
 
 **Línea de confianza** bajo los botones:
@@ -809,15 +809,15 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 | Especificación | Valor |
 |---|---|
-| Versión | 1.0 (exe 1.0.0.0) · 4 de noviembre de 2026 |
+| Versión | 1.0.1 (exe 1.0.1.0) · 13 de noviembre de 2026 (la 1.0, el 4 de noviembre) |
 | Precio | Gratis (versión Comunidad, local) |
 | Licencia | GPL-3.0-or-later (software libre; el instalador y el portable incluyen `LICENSE.txt`) |
 | Sistema operativo | Windows 10 versión 1809 (compilación 17763) o posterior, y Windows 11 |
 | Arquitectura | 64 bits (x64) |
 | Permisos | Instalar: usuario estándar, sin administrador. Modo enfoque: administrador (botón «Reiniciar como administrador», con el aviso UAC de Windows) |
 | Idioma | Español |
-| Instalador | `PomoGrowth_v1.0_instalador.exe` · 75,8 MB · Inno Setup, solo en español |
-| Versión portable | `PomoGrowth_v1.0_portable.zip` · 103,1 MB |
+| Instalador | `PomoGrowth_v1.0.1_instalador.exe` · 75,8 MB · Inno Setup, solo en español |
+| Versión portable | `PomoGrowth_v1.0.1_portable.zip` · 103,1 MB |
 | Ejecutable | `PomoGrowth.exe` (hasta la 9.4, versiones internas, `PomoGrowth9.exe`) |
 | Espacio instalado | ≈ 220 MB |
 | Carpeta de instalación | `%LOCALAPPDATA%\Programs\PomoGrowth` (solo para tu usuario) |
@@ -891,7 +891,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 | | Instalador (recomendado) | Portable |
 |---|---|---|
-| Archivo | `PomoGrowth_v1.0_instalador.exe` (75,8 MB) | `PomoGrowth_v1.0_portable.zip` (103,1 MB) |
+| Archivo | `PomoGrowth_v1.0.1_instalador.exe` (75,8 MB) | `PomoGrowth_v1.0.1_portable.zip` (103,1 MB) |
 | Permisos | Sin administrador | Sin administrador |
 | Dónde se instala | `%LOCALAPPDATA%\Programs\PomoGrowth` | Donde descomprimas la carpeta |
 | Accesos directos | Menú Inicio y, si quieres, escritorio | No |
@@ -900,7 +900,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 ### Instalar
 
-1. Descarga `PomoGrowth_v1.0_instalador.exe`.
+1. Descarga `PomoGrowth_v1.0.1_instalador.exe`.
 2. Ejecútalo: se instala solo para tu usuario, sin pedir la contraseña de
    administrador.
 3. Marca, si quieres, el acceso directo en el escritorio.
@@ -1098,6 +1098,7 @@ redes o con una donación en Ko-fi.
 
 | Versión | Fecha | Lo más importante |
 |---|---|---|
+| **1.0.1** | 13 nov 2026 | **Arreglos y seguridad**: el webhook de entrada solo atiende a tu equipo (o a tu red con clave) y crea siempre tareas propias; los errores de Asana (token rechazado, límite de peticiones, caídas) se ven y se reintentan solos; la pestaña de ClickUp dice lo que hace; un texto roto ya no impide guardar |
 | **1.0** | 4 nov 2026 | **Primera versión pública**: todo lo de las versiones internas, más modo Libre sin límite; alta de tareas también en Asana o ClickUp; tareas de Asana sin proyecto; saludo con tu nombre y racha de días de uso; valoración de esfuerzo; búfer para las radios que se cortan; modo enfoque con «Reiniciar como administrador» y a prueba de hosts de solo lectura; sonidos propios del temporizador (campana, marimba o suave, con su volumen); sonidos de ambiente para mezclar con la música (lluvia, océano, ruido blanco…); presentación animada del primer arranque; firma «Fabricioplus» y Ko-fi en la despedida. El programa pasa a llamarse `PomoGrowth.exe` |
 
 Antes de la 1.0, PomoGrowth pasó más de tres meses en uso diario, en ocho
