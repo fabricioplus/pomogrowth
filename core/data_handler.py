@@ -91,6 +91,7 @@ except ImportError:
     requests = None
     REQUESTS_AVAILABLE = False
 
+from core.asana_errors import AsanaFetchError, error_from_response
 from core.config import Config
 from core.music_library import default_music, normalize_music
 from core.ambient_catalog import normalize_mix as normalize_ambient_mix
@@ -966,6 +967,9 @@ class DataHandler:
     def get_incomplete_tasks_summary(self) -> Optional[Dict[str, Any]]:
         """Devuelve un resumen de tareas incompletas por proyecto para el usuario configurado.
         Estructura: { 'user_name': str|None, 'total': int, 'per_project': { project_name: count } }
+        Si un listado de Asana falla lanza AsanaFetchError (antes contaba a
+        medias, o 0, sin avisar). Los nombres de usuario y proyecto siguen
+        siendo de mejor esfuerzo (sin ellos, el GID).
         """
         headers = self._get_asana_headers()
         if not headers or not REQUESTS_AVAILABLE:
@@ -1010,62 +1014,45 @@ class DataHandler:
             if pg not in project_workspace_map:
                 project_workspace_map[pg] = workspace_gid_global
 
-        # Preferir el endpoint de búsqueda por workspace para filtros confiables cuando haya workspace
+        # Preferir el endpoint de búsqueda por workspace para filtros confiables
+        # cuando haya workspace. Un listado que falla (también en una página
+        # intermedia) lanza AsanaFetchError: nunca se cuenta a medias
         for pgid in project_gids:
-            try:
-                pname = self.get_asana_project_name(pgid) or pgid
-                count = 0
-                workspace_gid = project_workspace_map.get(pgid)
-                if workspace_gid:
-                    # /workspaces/{workspace_gid}/tasks/search con filtros
-                    url = f"{Config.ASANA_API_URL}/workspaces/{workspace_gid}/tasks/search"
-                    params = {
-                        "projects.any": pgid,
-                        **({"assignee.any": assignee_gid} if assignee_gid else {}),
-                        "completed": False,
-                        "limit": 100,
-                        "opt_fields": "gid,completed"
-                    }
-                    next_page = None
-                    while True:
-                        if next_page and isinstance(next_page, dict) and next_page.get('offset'):
-                            params['offset'] = next_page['offset']
-                        resp = requests.get(url, headers=headers, params=params, timeout=20)
-                        if resp.status_code != 200:
-                            break
-                        data = resp.json() or {}
-                        items = data.get('data') or []
-                        for t in items:
-                            if not t.get('completed', False):
-                                count += 1
-                        next_page = (data.get('next_page') or None)
-                        if not next_page:
-                            break
-                else:
-                    # Fallback al listado por proyecto y filtrado cliente
-                    url = f"{Config.ASANA_API_URL}/projects/{pgid}/tasks"
-                    params = {"limit": 100, "opt_fields": "gid,completed,assignee.gid"}
-                    next_page = None
-                    while True:
-                        if next_page and isinstance(next_page, dict) and next_page.get('offset'):
-                            params['offset'] = next_page['offset']
-                        resp = requests.get(url, headers=headers, params=params, timeout=20)
-                        if resp.status_code != 200:
-                            break
-                        data = resp.json() or {}
-                        items = data.get('data') or []
-                        for t in items:
-                            if (not assignee_gid or (t.get('assignee') or {}).get('gid') == assignee_gid) and not t.get('completed', False):
-                                count += 1
-                        next_page = (data.get('next_page') or None)
-                        if not next_page:
-                            break
-                total += count
-                per_project[pname] = per_project.get(pname, 0) + count
-            except requests.RequestException:
-                continue
-            except Exception:
-                continue
+            pname = self.get_asana_project_name(pgid) or pgid
+            count: Optional[int] = None
+            workspace_gid = project_workspace_map.get(pgid)
+            if workspace_gid:
+                # /workspaces/{workspace_gid}/tasks/search con filtros
+                params = {
+                    "projects.any": pgid,
+                    **({"assignee.any": assignee_gid} if assignee_gid else {}),
+                    "completed": False,
+                    "limit": 100,
+                    "opt_fields": "gid,completed"
+                }
+                try:
+                    items = self._asana_get_all(
+                        f"{Config.ASANA_API_URL}/workspaces/{workspace_gid}/tasks/search",
+                        headers, params, 20, target=f"el workspace {workspace_gid}")
+                    count = sum(1 for t in items if not t.get('completed', False))
+                except AsanaFetchError as e:
+                    # La búsqueda es solo de los planes de pago (402): sin
+                    # ella, el listado del proyecto (antes contaba 0)
+                    if e.status != 402:
+                        raise
+            if count is None:
+                # Listado por proyecto y filtrado cliente
+                params = {"limit": 100, "opt_fields": "gid,completed,assignee.gid"}
+                items = self._asana_get_all(
+                    f"{Config.ASANA_API_URL}/projects/{pgid}/tasks", headers, params, 20,
+                    target=f"el proyecto «{pname}»",
+                    hint="Revisa los proyectos en ⚙ Configuración → Asana.")
+                count = sum(1 for t in items
+                            if (not assignee_gid
+                                or (t.get('assignee') or {}).get('gid') == assignee_gid)
+                            and not t.get('completed', False))
+            total += count
+            per_project[pname] = per_project.get(pname, 0) + count
         # Fallback local si API no devuelve nada útil pero hay datos locales
         if total == 0:
             try:
@@ -1133,6 +1120,9 @@ class DataHandler:
         """Lista proyectos de Asana dentro de un Workspace.
         Devuelve una lista de dicts con al menos: {'gid': str, 'name': str}
         Permite un PAT temporal (pat_override) para primer uso antes de guardar.
+        Si Asana no responde bien (también en una página intermedia) lanza
+        AsanaFetchError: Ajustes muestra el motivo en vez de «no hay
+        proyectos» o una lista incompleta.
         """
         # Construir headers usando override si se provee
         if not REQUESTS_AVAILABLE or not workspace_gid:
@@ -1146,35 +1136,19 @@ class DataHandler:
             headers = self._get_asana_headers()
         if not headers:
             return []
-        try:
-            params = {
-                "workspace": workspace_gid,
-                "archived": False,
-                "limit": 100,
-                "opt_fields": "gid,name",
-            }
-            url = f"{Config.ASANA_API_URL}/projects"
-            results: List[Dict[str, Any]] = []
-            next_page = None
-            while True:
-                if next_page:
-                    params["offset"] = next_page
-                resp = requests.get(url, headers=headers, params=params, timeout=20)
-                if resp.status_code != 200:
-                    print(f"Error al listar proyectos de Asana: {resp.status_code} - {resp.text}")
-                    break
-                data = resp.json().get("data", [])
-                results.extend(data)
-                next_page = resp.json().get("next_page", {}).get("offset") if isinstance(resp.json().get("next_page"), dict) else None
-                if not next_page:
-                    break
-            # Orden alfabético por nombre
-            results = [p for p in results if isinstance(p, dict) and p.get("gid") and p.get("name")]
-            results.sort(key=lambda p: p.get("name", "").lower())
-            return results
-        except requests.RequestException as e:
-            print(f"Error de red al listar proyectos en Asana: {e}")
-            return []
+        params = {
+            "workspace": workspace_gid,
+            "archived": False,
+            "limit": 100,
+            "opt_fields": "gid,name",
+        }
+        results = self._asana_get_all(f"{Config.ASANA_API_URL}/projects", headers, params, 20,
+                                      target=f"el workspace {workspace_gid}",
+                                      hint="Revisa el Workspace GID y el token de acceso.")
+        # Orden alfabético por nombre
+        results = [p for p in results if isinstance(p, dict) and p.get("gid") and p.get("name")]
+        results.sort(key=lambda p: p.get("name", "").lower())
+        return results
 
     def add_task(self, name: str, tags: List[str], source: str = 'local', asana_id: Optional[str] = None,
                  recurring=False, due: Optional[str] = None,
@@ -1605,6 +1579,54 @@ class DataHandler:
         self._save()
 
     # ------------------ ASANA SYNC (READ) ------------------
+    # Las lecturas de listados pasan por _asana_get_json/_asana_get_all: un
+    # error (HTTP, red, JSON ilegible) lanza AsanaFetchError en vez de
+    # devolver una lista vacía o a medias que el sync tomaría por buena.
+    def _asana_get_json(self, url: str, headers: Dict[str, str],
+                        params: Optional[Dict[str, Any]], timeout: float,
+                        target: str = '', hint: str = '') -> Dict[str, Any]:
+        """GET a Asana que tiene que salir bien: el cuerpo JSON (un dict) o
+        AsanaFetchError."""
+        try:
+            resp = requests.get(url, headers=headers, params=params, timeout=timeout)
+        except requests.RequestException as e:
+            print(f"Error de red al consultar Asana ({url}): {e}")
+            raise AsanaFetchError('network', target=target, hint=hint, detail=str(e)) from e
+        if resp.status_code != 200:
+            err = error_from_response(resp, target, hint)
+            print(f"Error al leer de Asana ({url}): HTTP {resp.status_code} "
+                  f"({err.kind}) - {err.detail}")
+            raise err
+        try:
+            body = resp.json()
+        except ValueError as e:  # también el JSONDecodeError de requests
+            print(f"Asana devolvió un JSON ilegible ({url}): {e}")
+            raise AsanaFetchError('bad_response', 200, target=target, hint=hint,
+                                  detail=f"JSON ilegible: {e}") from e
+        if not isinstance(body, dict):
+            raise AsanaFetchError('bad_response', 200, target=target, hint=hint,
+                                  detail=f"se esperaba un objeto, llegó {type(body).__name__}")
+        return body
+
+    def _asana_get_all(self, url: str, headers: Dict[str, str], params: Dict[str, Any],
+                       timeout: float, target: str = '', hint: str = '') -> List[Dict[str, Any]]:
+        """Todas las páginas de un listado (siguiendo next_page.offset, en el
+        mismo dict de params) o AsanaFetchError: una página que falla invalida
+        el listado entero, nunca se devuelve a medias."""
+        results: List[Dict[str, Any]] = []
+        while True:
+            body = self._asana_get_json(url, headers, params, timeout, target, hint)
+            data = body.get('data')
+            if not isinstance(data, list) or not all(isinstance(x, dict) for x in data):
+                raise AsanaFetchError('bad_response', 200, target=target, hint=hint,
+                                      detail="falta la lista 'data' o trae elementos raros")
+            results.extend(data)
+            next_page = body.get('next_page')
+            offset = next_page.get('offset') if isinstance(next_page, dict) else None
+            if not offset:
+                return results
+            params["offset"] = offset
+
     def fetch_asana_tasks_for_assignee(self, assignee_gid: str, workspace_gid: str, project_gid: Optional[str] = None, include_completed: bool = False,
                                        include_no_project: bool = False,
                                        linked_gids: Optional[Set[str]] = None) -> List[Dict[str, Any]]:
@@ -1638,40 +1660,27 @@ class DataHandler:
     def _fetch_asana_assigned(self, assignee_gid: str, workspace_gid: str,
                               include_completed: bool = False) -> List[Dict[str, Any]]:
         """GET /tasks?assignee&workspace: todas las tareas asignadas del
-        workspace («Mis tareas», con o sin proyecto), página a página."""
+        workspace («Mis tareas», con o sin proyecto), página a página.
+
+        Cualquier fallo (HTTP, sin red, JSON ilegible), también en una página
+        intermedia, lanza AsanaFetchError: el sync debe terminar en el camino
+        de ERROR, no como un «éxito» con 0 tareas (o con la mitad) que además
+        dispararía la verificación una a una de las que faltan."""
         headers = self._get_asana_headers()
         if not headers or not REQUESTS_AVAILABLE:
             print("Asana fetch omitido: Falta PAT o 'requests'.")
             return []
-        try:
-            params = {
-                "assignee": assignee_gid,
-                "workspace": workspace_gid,
-                "completed_since": "1970-01-01T00:00:00.000Z" if include_completed else "now",
-                "limit": 100,
-                "opt_fields": "gid,name,completed,permalink_url,created_at,modified_at,due_on,due_at,tags.name,projects.name,projects.gid,assignee.gid,parent.gid"
-            }
-            url = f"{Config.ASANA_API_URL}/tasks"
-            results: List[Dict[str, Any]] = []
-            next_page = None
-            while True:
-                if next_page: params["offset"] = next_page
-                resp = requests.get(url, headers=headers, params=params, timeout=20)
-                if resp.status_code != 200:
-                    print(f"Error al obtener tareas de Asana: {resp.status_code} - {resp.text}")
-                    break
-                data = resp.json().get("data", [])
-                results.extend(data)
-                next_page = resp.json().get("next_page", {}).get("offset") if isinstance(resp.json().get("next_page"), dict) else None
-                if not next_page:
-                    break
-            return results
-        except requests.RequestException as e:
-            # Propagar: sin red el sync debe terminar en el camino de ERROR
-            # (offline), no como un "éxito" con 0 tareas que además dispararía
-            # la verificación una-a-una con timeouts de 10 s por tarea
-            print(f"Error de red al consultar Asana: {e}")
-            raise
+        params = {
+            "assignee": assignee_gid,
+            "workspace": workspace_gid,
+            "completed_since": "1970-01-01T00:00:00.000Z" if include_completed else "now",
+            "limit": 100,
+            "opt_fields": "gid,name,completed,permalink_url,created_at,modified_at,due_on,due_at,tags.name,projects.name,projects.gid,assignee.gid,parent.gid"
+        }
+        return self._asana_get_all(
+            f"{Config.ASANA_API_URL}/tasks", headers, params, 20,
+            target=f"el workspace {workspace_gid}",
+            hint="Revisa el workspace y el Assignee GID en ⚙ Configuración → Asana.")
 
     def merge_asana_tasks(self, asana_tasks: List[Dict[str, Any]]):
         if not asana_tasks:
@@ -1876,16 +1885,14 @@ class DataHandler:
                 by_ws.setdefault(ws, set()).add(pr)
         all_tasks: List[Dict[str, Any]] = []
         for ws, projects in by_ws.items():
-            try:
-                tasks = self._fetch_asana_assigned(assignee_gid, ws, include_completed)
-                if projects is not None:
-                    tasks = self._filter_asana_fetch(tasks, projects, include_no_project,
-                                                     linked_gids)
-                all_tasks.extend(tasks)
-            except requests.RequestException:
-                raise  # sin red: que el sync entre por el camino de error
-            except Exception as e:
-                print(f"Error en el workspace de Asana {ws}: {e}")
+            # Un workspace que falla (AsanaFetchError) invalida el fetch
+            # entero: sin él, sus tareas enlazadas faltarían en el listado y
+            # se verificarían una a una como si se hubieran borrado
+            tasks = self._fetch_asana_assigned(assignee_gid, ws, include_completed)
+            if projects is not None:
+                tasks = self._filter_asana_fetch(tasks, projects, include_no_project,
+                                                 linked_gids)
+            all_tasks.extend(tasks)
         # De-duplicar por gid/id
         uniq: Dict[str, Dict[str, Any]] = {}
         for t in all_tasks:

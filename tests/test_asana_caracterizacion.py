@@ -25,6 +25,7 @@ import requests
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from core.asana_errors import AsanaFetchError  # noqa: E402
 from core.data_handler import DataHandler, _new_outbox_op  # noqa: E402
 from services.asana_service import AsanaService  # noqa: E402
 from tests.fakes.net import ASANA_HOST, FakeResponse, asana_page, asana_path  # noqa: E402
@@ -77,10 +78,24 @@ def make_dh(tmp_path, monkeypatch):
     return build
 
 
+_SERVICIOS = []   # los de _Senales, para apagarlos al terminar cada test
+
+
+@pytest.fixture(autouse=True)
+def _sin_reintentos_colgados():
+    """Desde el encargo B1, un listado con 429/5xx programa el reintento del
+    sync (60 s): el servicio del test no se libera solo, así que se apaga
+    aquí para que ese reintento no salga a la red en medio de otro test."""
+    yield
+    while _SERVICIOS:
+        _SERVICIOS.pop().shutdown()
+
+
 class _Senales:
     """Lo que el servicio cuenta a la UI durante un sync."""
 
     def __init__(self, svc: AsanaService):
+        _SERVICIOS.append(svc)
         self.status, self.finished, self.errors = [], [], []
         self.progress, self.online = [], []
         svc.status.connect(self.status.append)
@@ -225,27 +240,28 @@ def test_las_completadas_localmente_no_se_verifican(qtbot, make_dh, fake_net):
     assert seen.finished == [0]
 
 
-@pytest.mark.parametrize("code", [401, 500])
-def test_un_error_http_del_listado_se_toma_por_lista_vacia(qtbot, make_dh, fake_net, code):
-    """Fija que un error HTTP del listado (no de red) NO va por el camino de
-    error: _fetch_asana_assigned corta y devuelve lo acumulado
-    (core/data_handler.py:1660-1662, aquí []) y el sync verifica UNA A UNA
-    todas las enlazadas abiertas y acaba en «Sin cambios desde Asana…» con
-    connection_state(True) y sin señal de error.
-    Comportamiento actual, posible bug: el comentario de
-    core/data_handler.py:1670-1672 quiere evitar justo esto para la falta de
-    red (un «éxito» con 0 tareas y una petición por tarea); con un 401 (PAT
-    revocado) el aviso habla del Assignee GID y no del token."""
+@pytest.mark.parametrize("code, message", [
+    (401, "Asana rechazó el token de acceso (HTTP 401). Revísalo en ⚙ Configuración → Asana."),
+    (500, "Asana no responde bien (error 500). Se reintentará en 1 min."),
+])
+def test_un_error_http_del_listado_va_por_el_camino_de_error(qtbot, make_dh, fake_net,
+                                                            code, message):
+    """CAMBIADO A PROPÓSITO en el encargo B1 (antes: «se toma por lista
+    vacía», el posible bug que fijaba este test). Un error HTTP del listado
+    ya no se toma por una lista vacía: _fetch_asana_assigned lanza
+    AsanaFetchError (core/data_handler.py:1595-1599, _asana_get_json) y el
+    sync termina por el camino de error (services/asana_service.py:434,
+    _on_error) con un texto por tipo, connection_state(False) y sin
+    finished: nada de «Sin cambios desde Asana…» ni de verificar una a una
+    las enlazadas (hay ruta para /tasks/{gid}, pero no se pide)."""
     dh = make_dh([_linked(1, GID_VIVA, 'Una'), _linked(2, GID_BORRADA, 'Otra')])
     fake_net.get(ASANA_HOST, LIST, FakeResponse(code, {'errors': [{'message': 'x'}]}))
     fake_net.get(ASANA_HOST, asana_path(r'/tasks/\d+'), FakeResponse(code))
     _svc, seen = _sync(qtbot, dh)
-    assert _paths(fake_net) == [('GET', '/api/1.0/tasks'),
-                                ('GET', f'/api/1.0/tasks/{GID_VIVA}'),
-                                ('GET', f'/api/1.0/tasks/{GID_BORRADA}')]
-    assert seen.errors == [] and seen.online == [True] and seen.finished == [0]
-    assert seen.status[-1] == ("Sin cambios desde Asana. Confirma el Assignee GID y "
-                               "el workspace.")
+    assert _paths(fake_net) == [('GET', '/api/1.0/tasks')]
+    assert seen.errors == [message] and seen.online == [False] and seen.finished == []
+    assert seen.status[-1] == f"❌ {message}"
+    assert not any('Sin cambios' in s for s in seen.status)
     assert not any(t.get('asana_deleted') for t in dh.get_tasks())
 
 
@@ -410,41 +426,45 @@ def test_conexiones_paginan_por_workspace_y_filtran_en_local(make_dh, fake_net):
     assert [c.params.get('offset') for c in fake_net.calls] == [None, 'tok-2', 'tok-3']
 
 
-def test_error_http_en_la_pagina_2_devuelve_solo_la_1(qtbot, make_dh, fake_net):
-    """Fija que un error HTTP a mitad de la paginación corta en silencio y
-    devuelve lo acumulado (core/data_handler.py:1660-1662); en el sync, la
-    enlazada que vivía en la 3.ª página se verifica una a una y no recibe los
-    cambios de Asana (el renombrado se pierde) sin ningún aviso.
-    Comportamiento actual, posible bug: un listado incompleto pasa por un
-    sync correcto («✅ Sincronización completada: 2 tareas.»)."""
+def test_error_http_en_la_pagina_2_invalida_el_listado(qtbot, make_dh, fake_net):
+    """CAMBIADO A PROPÓSITO en el encargo B1 (antes: «devuelve solo la 1», el
+    posible bug que fijaba este test: un listado incompleto pasaba por un
+    sync correcto). Un error HTTP a mitad de la paginación invalida el
+    listado entero (core/data_handler.py:1611, _asana_get_all): no se
+    devuelve la página 1, el sync no fusiona nada (ni las de la página 1 ni
+    el renombrado de la enlazada), no verifica una a una y avisa del error."""
     dh = make_dh([_linked(9, _gid(5), 'Nombre viejo')])
     _three_pages(fake_net, tok_2=FakeResponse(500, {'errors': [{'message': 'Server Error'}]}))
-    fake_net.get(ASANA_HOST, asana_path(f'/tasks/{_gid(5)}'),
-                 {'data': {'gid': _gid(5), 'completed': False}})
-    assert [t['name'] for t in dh._fetch_asana_assigned('A', 'W')] == ['Uno', 'Dos']
+    with pytest.raises(AsanaFetchError) as caught:
+        dh._fetch_asana_assigned('A', 'W')
+    assert (caught.value.kind, caught.value.status) == ('server', 500)
     fake_net.calls.clear()
     _svc, seen = _sync(qtbot, dh)
-    assert _paths(fake_net) == [('GET', '/api/1.0/tasks'), ('GET', '/api/1.0/tasks'),
-                                ('GET', f'/api/1.0/tasks/{_gid(5)}')]
-    assert _by_gid(dh, _gid(5))['name'] == 'Nombre viejo'
-    assert seen.status[-1] == "✅ Sincronización completada: 2 tareas."
-    assert seen.errors == []
+    assert _paths(fake_net) == [('GET', '/api/1.0/tasks'), ('GET', '/api/1.0/tasks')]
+    assert [t['name'] for t in dh.get_tasks()] == ['Nombre viejo']
+    assert seen.status[-1] == "❌ Asana no responde bien (error 500). Se reintentará en 1 min."
+    assert seen.errors == ["Asana no responde bien (error 500). Se reintentará en 1 min."]
+    assert seen.finished == []
 
 
 def test_sin_red_en_la_pagina_2_va_por_el_camino_de_error(qtbot, make_dh, fake_net):
-    """Fija que un fallo de RED a mitad de la paginación se propaga
-    (core/data_handler.py:1669-1674 y :1885-1886): lo ya descargado se
-    descarta, no se fusiona nada y el sync termina en error con
-    connection_state(False) (services/asana_service.py:370-375)."""
+    """Fija que un fallo de RED a mitad de la paginación se propaga (desde
+    el encargo B1, como AsanaFetchError('network') con la excepción de
+    requests como causa, core/data_handler.py:1590-1594): lo ya descargado
+    se descarta, no se fusiona nada y el sync termina en error con
+    connection_state(False). El texto pasó de «Error durante la
+    sincronización: <excepción>» a «Sin conexión con Asana.»."""
     dh = make_dh()
     _three_pages(fake_net, tok_2=requests.ConnectionError("sin red (simulado)"))
-    with pytest.raises(requests.ConnectionError):
+    with pytest.raises(AsanaFetchError) as caught:
         dh._fetch_asana_assigned('A', 'W')
+    assert caught.value.kind == 'network'
+    assert isinstance(caught.value.__cause__, requests.ConnectionError)
     _svc, seen = _sync(qtbot, dh)
     assert dh.get_tasks() == []
     assert seen.online == [False] and seen.finished == []
-    assert seen.errors == ["Error durante la sincronización: sin red (simulado)"]
-    assert seen.status[-1] == "❌ Error durante la sincronización: sin red (simulado)"
+    assert seen.errors == ["Sin conexión con Asana."]
+    assert seen.status[-1] == "❌ Sin conexión con Asana."
 
 
 def test_listar_proyectos_recorre_tres_paginas(make_dh, fake_net):
@@ -452,9 +472,10 @@ def test_listar_proyectos_recorre_tres_paginas(make_dh, fake_net):
     «Cargar proyectos»): GET /projects con workspace, archived=False, limit 100
     y opt_fields gid,name, siguiendo next_page.offset; con pat_override solo
     manda Authorization; descarta los que no traen gid o nombre y ordena por
-    nombre sin mayúsculas. Un error HTTP en la página 2 devuelve la 1 sola
-    (comportamiento actual, posible bug: la lista de Ajustes sale incompleta
-    sin aviso)."""
+    nombre sin mayúsculas. CAMBIADO A PROPÓSITO en el encargo B1: un error
+    HTTP en la página 2 ya no devuelve la 1 sola (la lista de Ajustes salía
+    incompleta sin aviso), lanza AsanaFetchError y Ajustes muestra el
+    motivo."""
     dh = make_dh(settings={})
     pages = ([{'gid': 'P3', 'name': 'web'}, {'gid': 'P0', 'name': ''}],
              [{'gid': 'P1', 'name': 'Marketing'}, {'name': 'Sin gid'}],
@@ -468,7 +489,9 @@ def test_listar_proyectos_recorre_tres_paginas(make_dh, fake_net):
     assert dict(fake_net.calls[0].headers) == {'Authorization': 'Bearer pat-temporal'}
     fake_net.calls.clear()
     _three_pages(fake_net, path=asana_path('/projects'), pages=pages, tok_2=500)
-    assert [p['gid'] for p in dh.list_asana_projects('W', pat_override='p')] == ['P3']
+    with pytest.raises(AsanaFetchError) as caught:
+        dh.list_asana_projects('W', pat_override='p')
+    assert (caught.value.kind, caught.value.status) == ('server', 500)
 
 
 C1 = "🍅 Sesión Pomodoro completada el 13/11 a las 10:00. Tiempo enfocado: 25 minutos."
