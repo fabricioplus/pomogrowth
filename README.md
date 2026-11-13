@@ -133,7 +133,7 @@ la versión portable se generan con los pasos de [Compilar](#compilar).
 
 ### Con el instalador (recomendado)
 
-1. Ejecuta `PomoGrowth_v1.0_instalador.exe` (queda en `dist/` al compilarlo).
+1. Ejecuta `PomoGrowth_v1.0.1_instalador.exe` (queda en `dist/` al compilarlo).
 2. Se instala solo para tu usuario y **sin permisos de administrador** en
    `%LOCALAPPDATA%\Programs\PomoGrowth`, con acceso en el menú Inicio y, si lo
    marcas, en el escritorio.
@@ -143,7 +143,7 @@ la versión portable se generan con los pasos de [Compilar](#compilar).
 
 ### Portable
 
-Descomprime `PomoGrowth_v1.0_portable.zip` en una carpeta con permiso de
+Descomprime `PomoGrowth_v1.0.1_portable.zip` en una carpeta con permiso de
 escritura y abre `PomoGrowth.exe`. Los datos se crean junto al exe, así que
 puedes llevarte la carpeta entera. Usa una ruta corta (por ejemplo
 `C:\PomoGrowth`): con rutas de más de 260 caracteres Windows no carga algunos
@@ -152,9 +152,10 @@ módulos.
 > [!NOTE]
 > El **modo enfoque** escribe en el archivo hosts de Windows: para usarlo, abre
 > PomoGrowth como administrador (o pulsa «Reiniciar como administrador» en su
-> ventana). La primera vez, Windows puede pedirte permiso
-> en el firewall: la app escucha webhooks entrantes en el puerto 8081 (para
-> automatizaciones como n8n).
+> ventana). Para recibir tareas desde automatizaciones como n8n, la app
+> escucha en el puerto 8081 solo de este equipo (127.0.0.1). Si eliges «Red
+> local, con clave» en Configuración → Webhook, Windows te pedirá permiso en el
+> firewall la primera vez.
 
 ## Desde el código
 
@@ -200,12 +201,12 @@ carpeta.
 pip install pyinstaller
 python scripts/build_brand_assets.py   # solo si cambia la mascota (assets/icono.svg)
 python -m PyInstaller PomoGrowth.spec --noconfirm --distpath build/release --workpath build/work
-ISCC.exe installer\PomoGrowth.iss      # Inno Setup 6.6+ → dist\PomoGrowth_v1.0_instalador.exe
+ISCC.exe installer\PomoGrowth.iss      # Inno Setup 6.6+ → dist\PomoGrowth_v1.0.1_instalador.exe
 ```
 
 - El build queda en `build/release/PomoGrowth/` (`PomoGrowth.exe` +
   `_internal/`) y sin datos. `python scripts/make_portable.py` la comprime en
-  `dist\PomoGrowth_v1.0_portable.zip` (la versión portable) y se niega si junto
+  `dist\PomoGrowth_v1.0.1_portable.zip` (la versión portable) y se niega si junto
   al exe hay datos, por ejemplo si lo abriste para probarlo.
 - **Nunca compiles con la salida en `dist/`**: PyInstaller vacía la carpeta de
   salida entera y en `dist/` puede haber una instalación con datos reales. El

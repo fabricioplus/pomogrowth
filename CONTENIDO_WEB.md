@@ -391,11 +391,13 @@ Si te quedas sin conexión, los cambios esperan y se envían después.
 **Texto corto**: Crea tareas desde n8n u otra herramienta y recibe un evento
 cada vez que completas un pomodoro.
 
-- **Webhook de entrada**: `POST http://<equipo>:8081/webhook` con un JSON
-  (`name` o `task_name` y, opcionalmente, `tags`, `source` y `asana_id`) crea
-  una tarea en la lista mientras la sincronización esté encendida. Sin `source`,
-  la tarea se marca como de Asana: envía `"source": "local"` para una tarea
-  propia.
+- **Webhook de entrada**: `POST http://127.0.0.1:8081/webhook` con
+  `Content-Type: application/json` y un JSON (`name` o `task_name` y,
+  opcionalmente, `tags`) crea una tarea propia en la lista mientras la
+  sincronización esté encendida. Por defecto solo atiende a los programas de
+  tu equipo; en Configuración → Webhook → «Recibir tareas» puedes elegir «Red
+  local, con clave» (otros equipos envían la clave en la cabecera
+  `X-PomoGrowth-Key`) o «Desactivado».
 - **Evento de salida**: con una URL configurada en Configuración → «Webhook»,
   cada pomodoro completado envía `pomodoro_completed` (`task_name`, `task_id`,
   `asana_id`, `duration_seconds` y `timestamp`) en un único intento. Una sesión
@@ -831,7 +833,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 | Exportación | CSV y XLSX (incluidos en el exe) |
 | IA de la mascota (opcional) | Claude (Anthropic), ChatGPT (OpenAI) o un endpoint compatible con OpenAI |
 | Integraciones | Asana (API oficial con token personal), ClickUp (solo crear tareas, con token personal), webhooks de entrada y salida (n8n) |
-| Puertos | 61968 TCP solo local (instancia única), 8081 TCP (webhook de entrada) y, desde el primer corte de una radio, un puerto aleatorio solo local en 127.0.0.1 (proxy del búfer de radios) |
+| Puertos | 61968 TCP solo local (instancia única), 8081 TCP (webhook de entrada: solo local por defecto; en toda la red local, con clave, si lo eliges) y, desde el primer corte de una radio, un puerto aleatorio solo local en 127.0.0.1 (proxy del búfer de radios) |
 | Ventana principal | 1100 × 720 la primera vez (después recuerda tamaño y posición); mínimo 900 × 520 (460 px de ancho con las tareas plegadas) |
 | Ventana compacta | 312 × 116 px, siempre encima |
 | Tipografía | Segoe UI Variable (Segoe UI en Windows 10), con cifras tabulares en el timer |
@@ -875,10 +877,11 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 - Los tokens y claves (Asana, ClickUp, IA) se guardan **en texto plano** en el
   archivo de datos de tu equipo. No compartas la carpeta de PomoGrowth ni sus
   copias.
-- El webhook de entrada está siempre activo en el **puerto 8081**, en todas las
-  interfaces de red y sin contraseña: con la sincronización encendida,
-  cualquier equipo de tu red puede crear tareas. La primera vez, Windows puede
-  pedir permiso en el firewall (puedes denegarlo si no usas n8n).
+- El webhook de entrada escucha en el **puerto 8081 solo de tu equipo**
+  (127.0.0.1) y rechaza las peticiones que vienen de páginas web. Si eliges
+  «Red local, con clave», atiende a toda tu red, pero solo a quien envíe la
+  clave, y Windows pedirá permiso en el firewall. También puedes desactivarlo.
+  Lo que llega siempre se crea como tarea propia: nunca toca Asana.
 
 ---
 
@@ -930,8 +933,8 @@ no carga algunos módulos). Abre `PomoGrowth.exe`.
 
 - **Modo enfoque**: para bloquear sitios, pulsa «Reiniciar como
   administrador» en su ventana o abre PomoGrowth como administrador.
-- **Firewall**: la primera vez, Windows puede pedir permiso porque la app
-  escucha webhooks en el puerto 8081 (para automatizaciones como n8n).
+- **Firewall**: Windows solo pide permiso si eliges recibir tareas desde la red
+  local (Configuración → Webhook → «Red local, con clave»).
 - **SmartScreen**: el instalador no está firmado digitalmente, así que Windows
   puede mostrar un aviso al ejecutarlo (ver [Por confirmar](#16-por-confirmar-antes-de-publicar)).
 
@@ -1080,8 +1083,10 @@ los sitios bloqueados no se exportan: copia también `user_progress.json` y
 `focus_config.json`.
 
 **¿Por qué Windows me pide permiso en el firewall?**
-Porque PomoGrowth escucha en el puerto 8081 para recibir tareas desde
-automatizaciones como n8n.
+Porque elegiste recibir tareas desde otros equipos de tu red (Configuración →
+Webhook → «Red local, con clave»). Por defecto PomoGrowth solo escucha a tu
+propio equipo y Windows no pregunta nada. Si actualizaste desde la 1.0, quizá
+lo preguntó entonces: en la 1.0 el webhook escuchaba en toda la red.
 
 **¿Cómo puedo apoyar PomoGrowth?**
 Dándole una estrella en GitHub, siguiendo a @xgrowthlab y @fabricioplus en
@@ -1429,12 +1434,10 @@ debería decir lo contrario:
   crea en tu lista de ClickUp (nombre y fecha) y ahí acaba. Completarla,
   renombrarla o borrarla en PomoGrowth no llega a ClickUp, no se traen tareas
   de ClickUp, la tarjeta no muestra ninguna marca de ClickUp y, sin conexión,
-  el alta no se reintenta (solo avisa). Su pestaña aún dice «Sincroniza las
-  tareas de una lista» y tiene dos interruptores («Incluir tareas completadas»
-  y «Sincronizar al abrir la app») que no hacen nada. Anunciarlo solo como
-  «crea la tarea también en ClickUp».
-- **ngrok no está conectado**: la app no abre ningún túnel, y tampoco recibe los
-  webhooks de Asana.
+  el alta no se reintenta (solo avisa). Anunciarlo solo como «crea la tarea
+  también en ClickUp» (desde la 1.0.1 su pestaña lo dice así).
+- La app no recibe los webhooks de Asana: los cambios en Asana llegan al
+  sincronizar.
 - Asana no se sincroniza sola cada cierto tiempo: solo a mano, al abrir la app
   (si se activa) o al encender el interruptor.
 - Solo se traen las tareas de Asana asignadas a ti, de un espacio de trabajo a
@@ -1448,8 +1451,7 @@ debería decir lo contrario:
 - No hay subtareas, prioridad, estimación, selección múltiple ni deshacer.
 - La fecha de vencimiento solo se pone al crear la tarea, y la repetición solo
   existe en tareas propias (una tarea fija no se puede crear en Asana).
-- El webhook de entrada solo crea tareas, escucha en toda la red local y no
-  pide contraseña.
+- El webhook de entrada solo crea tareas propias (no de Asana ni de ClickUp).
 - Con el interruptor de sincronización apagado, lo que llega por el webhook
   espera en memoria y se pierde al cerrar la app, y el pomodoro completado no
   deja comentario en Asana.
@@ -1581,9 +1583,8 @@ debería decir lo contrario:
 - [ ] ¿Nombrar los **modelos de IA** concretos en la web? Cambian a menudo; mejor
       decir «Claude, ChatGPT o un modelo local».
 - [ ] ¿Corregir antes del lanzamiento la tarjeta «Cómo ganar más», quitar de la
-      tienda los paquetes sin efecto y ocultar ngrok? ClickUp ya sirve para
-      crear tareas, pero su pestaña aún habla de sincronizar y tiene dos
-      interruptores sin efecto ([§15](#15-qué-no-prometer)). Con el ambiente
+      tienda los paquetes sin efecto? (ngrok y los interruptores de ClickUp
+      se quitaron en la 1.0.1, ver [§15](#15-qué-no-prometer)). Con el ambiente
       en la app, el paquete «Sonidos Naturaleza» se presta aún más a
       confusión.
 - [ ] **Probar en real lo añadido el 2 de noviembre**, que solo está cubierto

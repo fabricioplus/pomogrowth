@@ -5,6 +5,81 @@ módulos, esquema de datos) se describe en [DOCUMENTACION.md](DOCUMENTACION.md).
 
 ---
 
+## v1.0.1 — 2026-11-13 · Seguridad del webhook y errores de Asana visibles
+
+Una versión de arreglos antes de la 1.1 (integraciones). Cierra el webhook de
+entrada, que en la 1.0 escuchaba en toda la red sin clave, hace visibles los
+errores al leer de Asana y quita de Ajustes lo que no hacía nada.
+
+> [!IMPORTANT]
+> **Cambio de comportamiento**: el webhook de entrada solo atiende ahora a
+> los programas de **este equipo** (127.0.0.1). Si enviabas tareas desde n8n
+> u otra herramienta en **otro equipo**, elige «Red local, con clave» en
+> Configuración → Webhook y añade la cabecera `X-PomoGrowth-Key` con la clave.
+> Lo que llega por el webhook se crea siempre como **tarea propia**: los
+> campos `source` y `asana_id` del JSON ya no enlazan tareas a Asana.
+
+### Seguridad
+- **Webhook de entrada** (`services/webhook_server.py`): ajuste nuevo
+  `webhook_mode` con tres modos, «Solo este equipo» (`'local'`, por defecto:
+  escucha en 127.0.0.1), «Red local, con clave» (`'lan'`: en 0.0.0.0 y exige
+  la cabecera `X-PomoGrowth-Key`, comparada en tiempo constante con
+  `webhook_key`, generada con `secrets`) y «Desactivado» (`'off'`). Antes
+  escuchaba en 0.0.0.0:8081 sin autenticación y el JSON decidía `source` y
+  `asana_id`: cualquier equipo de la red, o una página web abierta en el
+  navegador, podía crear tareas enlazadas a gids de Asana ajenos, y al
+  completarlas la app escribía en ellos con tu token.
+  - Solo `POST /webhook` con `Content-Type: application/json` (si no, 415),
+    sin cabecera `Origin` (403: lo enviado desde una página web), con
+    `Content-Length` válido (400) de hasta 64 KB (413) y un objeto JSON (400).
+    Otros métodos dan 405 y otras rutas 404. Cada petición tiene 5 s.
+  - Lo recibido se crea siempre como tarea local: solo se usan el nombre
+    (`name` o `task_name`, hasta 500 caracteres) y `tags` (10 como mucho, de
+    40). Un elemento raro o un alta que falla se salta sin romper la cola.
+  - Sin `SO_REUSEADDR` en Windows (otro proceso podía atar el mismo puerto y
+    quedarse con las peticiones) y sin consulta DNS al arrancar el servidor.
+  - El servidor se rearranca al guardar Ajustes si cambian el modo o la clave
+    (con un aviso si el puerto está ocupado) y se para al salir.
+  - En una instalación nueva, Windows ya no pide permiso en el firewall al
+    primer arranque (solo al elegir «Red local, con clave»).
+
+### Corregido
+- **Errores al leer de Asana**: un 401 (token revocado), un 429, un 5xx o un
+  JSON ilegible al listar las tareas cortaba la paginación en silencio y el
+  sync terminaba como un éxito («Sin cambios desde Asana…»), o fusionaba un
+  listado a medias. Ahora cualquier fallo, también en una página intermedia,
+  lanza `AsanaFetchError` (`core/asana_errors.py`), el sync no fusiona nada y
+  muestra el motivo en la línea de estado y en un diálogo: «Asana rechazó el
+  token de acceso (HTTP 401). Revísalo en ⚙ Configuración → Asana.», «Asana
+  pide esperar: demasiadas peticiones. Se reintentará en N min.», «Sin
+  conexión con Asana.»… Ante un 429 o un 5xx se reintenta solo, respetando
+  `Retry-After`. Un workspace que falla invalida el sync entero.
+- **Ajustes → «Cargar proyectos»** recorre todas las páginas y, si falla,
+  dice por qué (antes, «No se encontraron proyectos» o solo la primera
+  página).
+
+### Cambiado
+- **Ajustes → ClickUp** dice lo que hace: «Crea en ClickUp las tareas que
+  añadas, en la lista que elijas», con la sección «Lista donde crear». Se
+  quitó la sección «Sincronización» y sus interruptores «Incluir tareas
+  completadas» y «Sincronizar al abrir la app», que no leía nadie (tampoco en
+  la v8); sus claves viejas se quedan en los datos sin tocar. El tooltip del
+  botón de sincronizar dice «Sincronizar ahora con Asana».
+- **Ajustes → Webhook**: la sección «ngrok (opcional)», que nunca abrió un
+  túnel, pasa a ser «Recibir tareas» (el modo y, en red local, la clave con
+  Copiar y Regenerar, y una nota con el uso exacto). Las claves `ngrok_*` de
+  tus datos se conservan, pero ya no se escriben.
+
+### Tests
+- Red falsa para toda la suite (`tests/fakes/net.py`, `FakeNet`) y una guarda
+  en `tests/conftest.py` que hace fallar cualquier test que intente salir a
+  internet (requests, urllib y httpx; loopback permitido).
+- Caracterización del sync con Asana (`test_asana_caracterizacion.py`) antes
+  de tocarlo, y pruebas nuevas de los errores de Asana, del webhook (con el
+  servidor real en un puerto libre) y de la pestaña ClickUp: 842 en total.
+
+---
+
 ## v1.0 — 2026-11-04 · Primera versión pública
 
 La 9.4 pasa a ser la **1.0**, la primera que se publica. Las versiones 9.0 a

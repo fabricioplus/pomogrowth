@@ -14,7 +14,7 @@
 
 #define AppName "PomoGrowth"
 ; La misma que Config.APP_VERSION (core/config.py): lo comprueba tests/test_installer.py
-#define AppVersion "1.0"
+#define AppVersion "1.0.1"
 #define AppExe "PomoGrowth.exe"
 ; Hasta la 9.4 (versiones internas, antes de la 1.0) el exe se llamaba así
 #define OldAppExe "PomoGrowth9.exe"
