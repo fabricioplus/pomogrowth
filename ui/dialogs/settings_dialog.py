@@ -698,13 +698,17 @@ class SettingsDialog(BrandedDialog):
                               "también las que no tienen proyecto.")
 
     def _build_clickup_tab(self) -> QWidget:
+        """Pestaña de ClickUp. En la 1.0 ClickUp solo crea tareas desde el
+        alta (ui/controllers/task_destinations.py): no se sincroniza, así que
+        aquí no hay interruptores de sincronización ni textos que la prometan."""
         s = self.settings
         page, inner, lay = self._page()
         active = s.get('active_integrations', []) or []
 
         self._section(inner, lay, "Conexión")
         card = self._add_card(inner, lay)
-        row = card.row("Integración con ClickUp", "Sincroniza las tareas de una lista de ClickUp")
+        row = card.row("Integración con ClickUp",
+                       "Crea en ClickUp las tareas que añadas, en la lista que elijas")
         self.chk_clickup = row.control(_ToggleControl(row, 'clickup' in active)).switch
         row = card.row("Token de API", "Token personal de ClickUp (empieza por pk_)")
         self.ed_cu_token = row.control(_SecretEdit(row, s.get('clickup_api_token', '')))
@@ -721,13 +725,13 @@ class SettingsDialog(BrandedDialog):
         btn_lay.addWidget(self.btn_load_cu)
         row.control(btns)
 
-        self._section(inner, lay, "Lista a sincronizar")
+        self._section(inner, lay, "Lista donde crear")
         card = self._add_card(inner, lay)
         combos = []
         for title, help_text, key in (
                 ("Workspace", "Tu equipo de ClickUp", 'clickup_workspace_id'),
                 ("Space", "Espacio dentro del workspace", 'clickup_space_id'),
-                ("Lista", "Lista cuyas tareas se sincronizan", 'clickup_list_id')):
+                ("Lista", "Donde se crean las tareas nuevas", 'clickup_list_id')):
             row = card.row(title, help_text)
             cb = QComboBox(row)
             cb.setFixedWidth(COMBO_W)
@@ -741,16 +745,6 @@ class SettingsDialog(BrandedDialog):
         self.cb_cu_workspace, self.cb_cu_space, self.cb_cu_list = combos
         self.cb_cu_workspace.currentIndexChanged.connect(self._on_cu_workspace)
         self.cb_cu_space.currentIndexChanged.connect(self._on_cu_space)
-
-        self._section(inner, lay, "Sincronización")
-        card = self._add_card(inner, lay)
-        row = card.row("Incluir tareas completadas", "Trae también las tareas cerradas de la lista")
-        self.chk_cu_completed = row.control(
-            _ToggleControl(row, bool(s.get('clickup_include_completed', False)))).switch
-        row = card.row("Sincronizar al abrir la app",
-                       "Actualiza la lista cada vez que inicias PomoGrowth")
-        self.chk_cu_auto = row.control(
-            _ToggleControl(row, bool(s.get('clickup_auto_sync', False)))).switch
         lay.addStretch(1)
         return page
 
@@ -1235,8 +1229,9 @@ class SettingsDialog(BrandedDialog):
             self.settings.get('clickup_space_id', '')
         s['clickup_list_id'] = self.cb_cu_list.currentData() or \
             self.settings.get('clickup_list_id', '')
-        s['clickup_include_completed'] = self.chk_cu_completed.isChecked()
-        s['clickup_auto_sync'] = self.chk_cu_auto.isChecked()
+        # clickup_include_completed y clickup_auto_sync ya no se escriben (la
+        # 1.0 no sincroniza con ClickUp); si existen, se quedan sin uso en los
+        # datos para cuando la sincronización llegue
 
         s['n8n_webhook_url'] = self.ed_n8n.text().strip()
         # «Recibir tareas». Los ngrok_authtoken/ngrok_domain de antes se quedan

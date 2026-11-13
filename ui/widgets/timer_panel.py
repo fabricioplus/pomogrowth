@@ -62,7 +62,8 @@ class TimerPanel(QWidget):
         self.connection_label.setFont(fonts.font(fonts.XS))
         self.connection_label.setProperty("role", "muted")
         conn_row.addWidget(self.connection_label)
-        self.sync_btn = IconButton("sync", "Sincronizar ahora (Asana/ClickUp)",
+        # Solo Asana: con ClickUp la app solo crea tareas desde el alta
+        self.sync_btn = IconButton("sync", "Sincronizar ahora con Asana",
                                    color=t.fg_muted, hover_color=t.accent, size=15,
                                    parent=self)
         self.sync_btn.setEnabled(False)
@@ -344,7 +345,7 @@ class TimerPanel(QWidget):
         c = colors[self._sync_state]
         self.sync_btn.set_colors(c, t.accent if self._sync_state != 'off' else t.fg_dim)
         tips = {'off': "Sincronización desactivada — enciende el switch para activarla",
-                'idle': "Sincronizar ahora (Asana/ClickUp)",
+                'idle': "Sincronizar ahora con Asana",
                 'syncing': "Sincronizando…",
                 'online': "Sincronizado — clic para sincronizar de nuevo",
                 'offline': "Sin conexión — clic para reintentar"}
