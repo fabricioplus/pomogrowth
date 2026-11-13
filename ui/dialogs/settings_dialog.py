@@ -1,5 +1,6 @@
 """Configuración de PomoGrowth v9: timer, Asana multi-conexión, ClickUp,
-webhook/ngrok, mascota IA y datos. Port de settings_view_ultra (v8) sobre Qt.
+webhooks (n8n y recibir tareas), mascota IA y datos. Port de
+settings_view_ultra (v8) sobre Qt.
 
 Diseño «setting cards» de Windows 11: cada pestaña agrupa los ajustes en
 secciones con título; cada ajuste es una fila con título y ayuda a la
@@ -34,12 +35,18 @@ from ui.widgets.toggle_switch import ToggleSwitch
 
 # Anchos fijos de los controles (columna derecha alineada en todas las filas)
 SPIN_W, COMBO_W, EDIT_W, SLIDER_W = 120, 240, 280, 160
+WEBHOOK_KEY_W = 220  # la clave del webhook, con «Copiar» y «Regenerar» al lado
 ROW_MIN_H = 56
 # Ayudas de la sección «Sonidos» (los de Windows suenan al volumen del sistema)
 SOUND_VOLUME_HELP = "Solo el de los avisos: la música va aparte"
 SOUND_VOLUME_WINDOWS_HELP = "Los de Windows suenan al volumen del sistema"
 SOUND_PREVIEW_HELP = "El fin de un pomodoro, con el estilo y el volumen elegidos"
 SOUND_PREVIEW_WINDOWS_HELP = "El fin de un pomodoro, con el sonido de Windows"
+# Ayuda de «Recibir tareas» según el modo (services/webhook_server.MODES)
+WEBHOOK_MODE_HELP = {
+    'local': "Solo los programas de este equipo (n8n, scripts…) pueden enviarte tareas",
+    'lan': "Otros equipos de tu red pueden enviarte tareas si llevan la clave",
+    'off': "No se escucha en ningún puerto: no llegan tareas por webhook"}
 # Alto de las pestañas (la de Timer cabe sin scroll) y lo que suman cabecera,
 # botonera, padding y sombra del diálogo alrededor
 PANE_MIN_H, DIALOG_CHROME_H = 524, 240
@@ -757,19 +764,93 @@ class SettingsDialog(BrandedDialog):
         self.ed_n8n = row.control(self._edit(row, s.get('n8n_webhook_url', ''),
                                              "https://…/webhook/…"))
 
-        self._section(inner, lay, "ngrok (opcional)")
-        card = self._add_card(inner, lay)
-        row = card.row("Authtoken", "Expone el servidor local para recibir callbacks de Asana")
-        self.ed_ngrok_token = row.control(_SecretEdit(row, s.get('ngrok_authtoken', '')))
-        row = card.row("Dominio", "Dominio reservado de ngrok, si tienes uno")
-        self.ed_ngrok_domain = row.control(self._edit(row, s.get('ngrok_domain', '')))
-
-        lay.addSpacing(8)
-        lay.addWidget(_Footnote(inner, "El servidor local de webhooks escucha en el puerto "
-                                       "8081 (POST /webhook). ngrok lo expone a internet "
-                                       "para recibir callbacks de Asana."))
+        self._build_webhook_inbox_section(inner, lay)
         lay.addStretch(1)
         return page
+
+    # --- Recibir tareas (services/webhook_server.py) ---
+    def _build_webhook_inbox_section(self, inner: QWidget, lay: QVBoxLayout) -> None:
+        """«Recibir tareas»: el servidor de webhooks entrantes, solo para este
+        equipo, para la red local con clave o desactivado. Lo recibido se
+        crea siempre como tarea local (ver AppController._process_webhook_queue).
+        La clave, generada, se ve solo en «Red local»."""
+        from services.webhook_server import (KEY_HEADER, MODE_LABELS, WEBHOOK_PATH,
+                                             normalize_key, normalize_mode)
+        s = self.settings
+        self._section(inner, lay, "Recibir tareas")
+        card = self._add_card(inner, lay)
+        self._webhook_mode_row = card.row("Servidor de webhooks", WEBHOOK_MODE_HELP['local'])
+        self.cb_webhook_mode = self._webhook_mode_row.control(QComboBox(self._webhook_mode_row))
+        self.cb_webhook_mode.setFixedWidth(COMBO_W)
+        for key, label in MODE_LABELS:
+            self.cb_webhook_mode.addItem(label, key)
+        self.cb_webhook_mode.setCurrentIndex(max(0, self.cb_webhook_mode.findData(
+            normalize_mode(s.get('webhook_mode')))))
+
+        row = card.row("Clave", f"Va en la cabecera {KEY_HEADER} de cada envío")
+        self.webhook_key_row = row
+        # El separador que la tarjeta puso encima de la fila se oculta con ella
+        self._webhook_key_divider = card._lay.itemAt(card._lay.count() - 2).widget()
+        box = QWidget(row)
+        box_lay = QHBoxLayout(box)
+        box_lay.setContentsMargins(0, 0, 0, 0)
+        box_lay.setSpacing(8)
+        self.ed_webhook_key = _SecretEdit(box, normalize_key(s.get('webhook_key')))
+        self.ed_webhook_key.setReadOnly(True)  # se genera: «Regenerar» la cambia
+        self.ed_webhook_key.setFixedWidth(WEBHOOK_KEY_W)
+        self.btn_copy_webhook_key = self._button(box, "Copiar", self._copy_webhook_key)
+        self.btn_new_webhook_key = self._button(box, "Regenerar", self._regenerate_webhook_key)
+        for w in (self.ed_webhook_key, self.btn_copy_webhook_key, self.btn_new_webhook_key):
+            box_lay.addWidget(w)
+        row.control(box)
+        self.webhook_key_status = row.add_below(_StatusLine(row))
+
+        self.cb_webhook_mode.currentIndexChanged.connect(self._sync_webhook_mode)
+        self._sync_webhook_mode()
+
+        lay.addSpacing(8)
+        lay.addWidget(_Footnote(
+            inner,
+            f"Envío: POST http://127.0.0.1:{Config.WEBHOOK_PORT}{WEBHOOK_PATH} (en red "
+            "local, con la IP de este equipo) con la cabecera Content-Type: "
+            f"application/json y, en red local, {KEY_HEADER} con la clave.\n"
+            'Cuerpo: {"name": "…", "tags": ["…"]}. Se crea siempre como tarea local '
+            "y llega con la sincronización activada.\n"
+            "En red local, Windows pedirá permiso del cortafuegos la primera vez."))
+
+    def _sync_webhook_mode(self, *_args) -> None:
+        """La fila de la clave, solo en «Red local» (al elegirlo sin clave se
+        crea una; se guarda con «Guardar»), y la ayuda del modo elegido."""
+        from services.webhook_server import new_key
+        mode = self.cb_webhook_mode.currentData()
+        lan = mode == 'lan'
+        if lan and not self.ed_webhook_key.text():
+            self.ed_webhook_key.setText(new_key())
+            self.ed_webhook_key.setCursorPosition(0)
+        self.webhook_key_row.setVisible(lan)
+        self._webhook_key_divider.setVisible(lan)
+        self._webhook_mode_row.help.setText(WEBHOOK_MODE_HELP.get(mode, ''))
+
+    def _copy_webhook_key(self) -> None:
+        QGuiApplication.clipboard().setText(self.ed_webhook_key.text())
+        self.webhook_key_status.set_status("Clave copiada al portapapeles", 'ok')
+
+    def _regenerate_webhook_key(self) -> None:
+        from services.webhook_server import new_key
+        self.ed_webhook_key.setText(new_key())
+        self.ed_webhook_key.setCursorPosition(0)
+        self.webhook_key_status.set_status(
+            "Clave nueva: vale desde que guardes. Cámbiala también donde usabas la anterior",
+            'warn')
+
+    def _save_webhook_inbox(self, s: Dict) -> None:
+        from services.webhook_server import new_key, normalize_mode
+        mode = normalize_mode(self.cb_webhook_mode.currentData())
+        key = self.ed_webhook_key.text().strip()
+        if mode == 'lan' and not key:
+            key = new_key()
+        s['webhook_mode'] = mode
+        s['webhook_key'] = key
 
     def _build_pet_tab(self) -> QWidget:
         s = self.settings
@@ -1158,8 +1239,9 @@ class SettingsDialog(BrandedDialog):
         s['clickup_auto_sync'] = self.chk_cu_auto.isChecked()
 
         s['n8n_webhook_url'] = self.ed_n8n.text().strip()
-        s['ngrok_authtoken'] = self.ed_ngrok_token.text().strip()
-        s['ngrok_domain'] = self.ed_ngrok_domain.text().strip()
+        # «Recibir tareas». Los ngrok_authtoken/ngrok_domain de antes se quedan
+        # en los datos, sin uso (la app nunca arrancó ngrok)
+        self._save_webhook_inbox(s)
 
         s['pet_provider'] = self.cb_pet_provider.currentData() or 'claude'
         s['pet_api_key'] = self.ed_pet_key.text().strip()

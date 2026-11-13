@@ -198,8 +198,11 @@ class AppController(QObject):
         window.title_bar.close_requested.connect(self.confirm_quit)
         window.close_guard = self._guard_window_close
 
-        # --- Webhook entrante + posición del panel ---
+        # --- Webhook entrante (según Ajustes: solo este equipo, red local con
+        # clave o apagado) + posición del panel ---
         self.webhook_queue = queue.Queue()
+        self.webhook_server = None
+        self._webhook_config = ('off', '')  # (modo, clave) del servidor en marcha
         self._start_webhook_server()
         self._webhook_timer = QTimer(self)
         self._webhook_timer.setInterval(500)
@@ -974,6 +977,7 @@ class AppController(QObject):
         # Sonidos del temporizador (sección «Sonidos» de Ajustes)
         sound_service.configure_from_settings(s)
         toast.show_success(self.window, "Configuración guardada", duration=1800)
+        self._restart_webhook_server_if_changed(s)  # «Recibir tareas»
         if self._asana_sync_allowed():
             # Con la conexión recién configurada, enviar lo que esperaba en cola
             self.asana.push_pending()
@@ -985,34 +989,83 @@ class AppController(QObject):
         self.destinations.refresh()  # botones de Asana/ClickUp del alta
 
     # ================= Webhook / n8n =================
-    def _start_webhook_server(self) -> None:
+    @staticmethod
+    def _webhook_settings(s: Dict[str, Any]) -> tuple:
+        """(modo, clave) de «Recibir tareas», saneados."""
+        from services.webhook_server import normalize_key, normalize_mode
+        return normalize_mode(s.get('webhook_mode')), normalize_key(s.get('webhook_key'))
+
+    def _start_webhook_server(self, s: Optional[Dict[str, Any]] = None) -> bool:
+        """Arranca el servidor de webhooks según Ajustes: 'local' (127.0.0.1),
+        'lan' (0.0.0.0 con clave) u 'off' (ninguno). False si el puerto no se
+        pudo abrir (p. ej. lo usa otro programa)."""
+        from services.webhook_server import WebhookServer, new_key
+        s = self.data_handler.load_settings() if s is None else s
+        mode, key = self._webhook_settings(s)
+        if mode == 'lan' and not key:
+            # 'lan' sin clave (un JSON editado a mano): se crea y se guarda
+            key = s['webhook_key'] = new_key()
+            self.data_handler.save_settings(s)
+        self._webhook_config = (mode, key)
+        self.webhook_server = None
+        if mode == 'off':
+            return True
         try:
-            from services.webhook_server import WebhookServer
-            self.webhook_server = WebhookServer(self.webhook_queue, Config.WEBHOOK_PORT)
-            self.webhook_server.start()
+            server = WebhookServer(self.webhook_queue, Config.WEBHOOK_PORT, mode=mode, key=key)
+            server.start()
         except OSError as e:
             print(f"Webhook server no disponible (puerto {Config.WEBHOOK_PORT}): {e}")
-            self.webhook_server = None
+            return False
+        self.webhook_server = server
+        return True
+
+    def _stop_webhook_server(self) -> None:
+        server, self.webhook_server = self.webhook_server, None
+        if server is not None:
+            try:
+                server.stop()
+            except OSError as e:
+                print(f"Al parar el servidor de webhooks: {e}")
+
+    def _restart_webhook_server_if_changed(self, s: Dict[str, Any]) -> None:
+        """Al guardar Ajustes: si cambió el modo o la clave, para el servidor
+        y lo vuelve a arrancar con lo nuevo (en el mismo puerto)."""
+        if self._webhook_settings(s) == self._webhook_config:
+            return
+        self._stop_webhook_server()
+        if not self._start_webhook_server(s):
+            toast.show_warning(self.window, f"No se pudo abrir el puerto {Config.WEBHOOK_PORT} "
+                                            "para recibir tareas: quizá lo usa otro programa",
+                               duration=4000)
 
     def _process_webhook_queue(self) -> None:
+        """Tareas recibidas por webhook (con el sync activado): SIEMPRE locales,
+        con solo su nombre y sus etiquetas (services/webhook_server.task_fields).
+        Lo demás que traiga el JSON (source, asana_id…) se descarta: un envío
+        no puede enlazar una tarea a Asana, donde la app escribiría con tu
+        token. Un elemento raro se salta y se siguen procesando los demás."""
         if not self.sync_enabled:
             return
-        try:
-            changed = False
-            while not self.webhook_queue.empty():
+        from services.webhook_server import task_fields
+        added = 0
+        while True:
+            try:
                 data = self.webhook_queue.get_nowait()
-                name = data.get("name") or data.get("task_name")
-                if name:
-                    self.data_handler.add_task(
-                        name=name, tags=data.get("tags", []),
-                        source=data.get("source", "asana"),
-                        asana_id=data.get("asana_id"))
-                    changed = True
-            if changed:
-                self.refresh_task_list()
-                toast.show_info(self.window, "Tarea recibida por webhook", duration=2000)
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            try:
+                fields = task_fields(data)
+                if fields is None:
+                    continue
+                name, tags = fields
+                self.data_handler.add_task(name=name, tags=tags, source='local')
+                added += 1
+            except Exception as e:
+                print(f"Tarea del webhook descartada: {e}")
+        if added:
+            self.refresh_task_list()
+            toast.show_info(self.window, "Tarea recibida por webhook" if added == 1
+                            else f"{added} tareas recibidas por webhook", duration=2000)
 
     def send_data_to_n8n(self, payload: Dict[str, Any]) -> None:
         url = Config.N8N_WEBHOOK_URL
@@ -1419,6 +1472,8 @@ class AppController(QObject):
         self._tick_timer.stop()
         # Sin reintentos ni envíos nuevos: la cola espera en el JSON
         self.asana.shutdown()
+        self._webhook_timer.stop()
+        self._stop_webhook_server()  # el puerto, libre para la siguiente instancia
         if self.model.is_free:
             # Modo Libre: cerrar la sesión con su tramo y sus recompensas (el
             # comentario de Asana espera en la cola al siguiente arranque)

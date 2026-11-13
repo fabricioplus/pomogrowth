@@ -25,6 +25,9 @@ OUTBOX_OP_TYPES = ('update', 'comment', 'create')
 # Estilos de los sonidos del temporizador (= services/sound_service.STYLE_KEYS;
 # lo comprueba tests/test_timer_sounds.py)
 TIMER_SOUND_STYLES = ('campana', 'marimba', 'suave', 'windows')
+# Modos del servidor de webhooks entrantes (= services/webhook_server.MODES;
+# lo comprueba tests/test_webhook_seguro.py). El primero es el de por defecto
+WEBHOOK_MODES = ('local', 'lan', 'off')
 
 
 def _new_outbox_op(op_type: str, gid: str, **payload) -> Dict[str, Any]:
@@ -135,7 +138,8 @@ class DataHandler:
             'effort_ratings': [],
             'settings': {
                 'ngrok_authtoken': '', 'ngrok_domain': '', 'asana_pat': '', 'asana_assignee_gid': '', 'asana_workspace_gid': '',
-                'asana_project_gid': '', 'asana_include_completed': False, 'asana_auto_sync_on_start': False, 'asana_connections': []
+                'asana_project_gid': '', 'asana_include_completed': False, 'asana_auto_sync_on_start': False, 'asana_connections': [],
+                'webhook_mode': WEBHOOK_MODES[0], 'webhook_key': ''
             }
         }
         if not self.filepath.exists():
@@ -206,7 +210,15 @@ class DataHandler:
                 data['settings'].get('timer_sound_volume'), 70)
             if data['settings'].get('timer_sound_style') not in TIMER_SOUND_STYLES:
                 data['settings']['timer_sound_style'] = 'campana'
-            
+            # Webhook entrante (services/webhook_server.py): 'local' (solo este
+            # equipo, por defecto) | 'lan' (red local, con clave) | 'off'. La
+            # clave, solo si es texto (el modo 'lan' sin clave lo rechaza todo)
+            mode = data['settings'].get('webhook_mode')
+            data['settings']['webhook_mode'] = (
+                mode if isinstance(mode, str) and mode in WEBHOOK_MODES else WEBHOOK_MODES[0])
+            key = data['settings'].get('webhook_key')
+            data['settings']['webhook_key'] = key if isinstance(key, str) else ''
+
             # ⭐ Validar y limpiar tareas corruptas
             valid_tasks = []
             for task in data.get('tasks', []):
