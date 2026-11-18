@@ -389,6 +389,29 @@ def test_la_sesion_nueva_espera_a_que_cierre_la_anterior(qtbot, emisora, proxy):
     first.stop()
 
 
+def test_varias_sesiones_seguidas_esperan_en_cadena(qtbot, emisora, proxy):
+    """I1: «siguiente» varias veces seguidas. Si la sesión intermedia aún
+    espera a la suya anterior (que sigue a medio conectar), la nueva no se
+    adelanta: espera a que acabe esa espera."""
+    proxy.PREVIOUS_WAIT_S = 1.0
+    proxy.open(emisora.url('prem1'), 0, known_live=True)
+    first = proxy._session
+    hold = threading.Event()
+    first.reader = threading.Thread(target=hold.wait, daemon=True)  # su lector, vivo
+    first.reader.start()
+    first.connecting = True              # y a medio conectar: sin liberar
+    started = emisora.now()
+    second = _Reproductor(proxy.open(emisora.url('prem2'), 0, known_live=True))
+    qtbot.waitUntil(lambda: proxy._session.reader is not None, timeout=WAIT)
+    third = _Reproductor(proxy.open(emisora.url('prem4'), 0, known_live=True))
+    qtbot.waitUntil(lambda: len(third.data) > 0, timeout=WAIT)
+    [rec] = emisora.streams()            # la intermedia, cerrada, no llegó a conectar
+    assert rec['host'] == 'prem4' and rec['t_open'] - started >= 0.8
+    hold.set()
+    second.stop()
+    third.stop()
+
+
 def test_cerrar_y_apagar_dejan_cero_conexiones(qtbot, emisora, proxy):
     """I8: close() y shutdown() cortan la conexión con la emisora al momento."""
     player = _Reproductor(proxy.open(emisora.url(), 0, known_live=True))

@@ -210,6 +210,7 @@ class _Session:
         self.closed = False
         self.released = False             # cerrada y con la conexión ya cortada (abort)
         self.connecting = False           # a medio conectar o esperando las cabeceras
+        self.waiting_previous = False     # su lector aún espera a que cierre la anterior
         self.started: Optional[float] = None      # el lector empezó a conectar
         self.first_data: Optional[float] = None   # primer audio entregado a la cola
         self.ready = False                # precarga hecha: ya se sirve
@@ -244,6 +245,7 @@ class _Session:
             gen = self.client_gen
             if self.reader is None:
                 self.user_agent = user_agent or USER_AGENT
+                self.waiting_previous = self.previous is not None
                 self.reader = threading.Thread(target=self._read_loop,
                                                name="pomogrowth-bufer", daemon=True)
                 self.reader.start()
@@ -376,20 +378,28 @@ class _Session:
     def _wait_previous(self) -> None:
         """Una sola conexión con la emisora: la de la sesión anterior tiene
         que estar cerrada antes de abrir esta (con plazo; desde este hilo)."""
-        previous, self.previous = self.previous, None
-        if previous is not None and previous is not self:
-            previous.wait_released(self.owner.PREVIOUS_WAIT_S)
+        with self.cond:
+            previous, self.previous = self.previous, None
+        try:
+            if previous is not None and previous is not self:
+                previous.wait_released(self.owner.PREVIOUS_WAIT_S)
+        finally:
+            with self.cond:
+                self.waiting_previous = False
+                self.cond.notify_all()
 
     def wait_released(self, timeout: float) -> bool:
         """¿Esta sesión ya no tiene conexión con el origen? Su lector terminó,
-        o la sesión está cerrada con la conexión cortada y sin otra a medias."""
+        o la sesión está cerrada con la conexión cortada, sin otra a medias y
+        sin seguir esperando a la suya anterior (con «siguiente» varias veces
+        seguidas, la de antes de antes aún podría estar abierta)."""
         end = time.monotonic() + max(0.0, timeout)
         with self.cond:
             while True:
                 reader = self.reader
                 if reader is None or not reader.is_alive():
                     return True
-                if self.released and not self.connecting:
+                if self.released and not (self.connecting or self.waiting_previous):
                     return True
                 left = end - time.monotonic()
                 if left <= 0:
