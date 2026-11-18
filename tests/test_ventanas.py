@@ -781,11 +781,22 @@ def test_el_aviso_no_tapa_los_controles_de_la_compacta(qtbot, where):
         toast.dismiss(t)
 
 
-def test_en_la_principal_el_aviso_sigue_en_su_esquina(ctrl, qtbot):
+@pytest.mark.parametrize("size", ["normal", "plegada"])
+def test_en_la_principal_el_aviso_sigue_en_su_esquina(ctrl, qtbot, size):
+    """La principal plegada (sin el panel de tareas) es estrecha pero alta:
+    el aviso sigue dentro, en su esquina. Por eso «pequeña» es estrecha Y
+    baja: con «o», saldría fuera de la ventana."""
     from ui.widgets import toast
+    from ui.windows.main_window import MIN_HEIGHT, MIN_WIDTH_COLLAPSED
     win = ctrl.window
+    if size == "plegada":
+        win.setMinimumSize(MIN_WIDTH_COLLAPSED, MIN_HEIGHT)
+        win.resize(MIN_WIDTH_COLLAPSED, 720)
+        qtbot.waitUntil(lambda: win.width() == MIN_WIDTH_COLLAPSED, timeout=2000)
+        assert win.width() < toast.Toast.SMALL_W and win.height() >= toast.Toast.SMALL_H
     t = toast.show_info(win, "Tarea añadida", duration=2000)
     try:
+        assert not t._goes_outside(win)
         qtbot.wait(350)
         card = _card_rect(t)
         geo = win.geometry()
@@ -793,6 +804,35 @@ def test_en_la_principal_el_aviso_sigue_en_su_esquina(ctrl, qtbot):
         assert geo.right() - card.right() == pytest.approx(t.MARGIN, abs=2)
     finally:
         toast.dismiss(t)
+
+
+def test_sobre_una_ventana_translucida_el_aviso_sale_fuera(qtbot):
+    """Translúcida (como la compacta o los diálogos de la casa), aunque sea
+    grande: su esquina inferior derecha puede ser su tarjeta, y el aviso sale
+    fuera. Opaca y grande, dentro; opaca y pequeña, fuera."""
+    from PySide6.QtWidgets import QWidget
+    from ui.widgets import toast
+    fonts.init_fonts()
+    area = QApplication.primaryScreen().availableGeometry()
+    cases = {}
+    for name, translucent, (w, h) in (("translucida", True, (520, 320)),
+                                      ("opaca", False, (520, 320)),
+                                      ("pequeña", False, (300, 150))):
+        win = QWidget()
+        qtbot.addWidget(win)
+        win.setAttribute(Qt.WA_TranslucentBackground, translucent)
+        win.setGeometry(area.left() + 40, area.top() + 40, w, h)
+        win.show()
+        qtbot.waitExposed(win)
+        t = toast.show_info(win, "Aviso", duration=2000)
+        try:
+            cases[name] = t._goes_outside(win)
+            qtbot.wait(350)
+            if cases[name]:
+                assert not _card_rect(t).intersects(win.geometry()), name
+        finally:
+            toast.dismiss(t)
+    assert cases == {"translucida": True, "opaca": False, "pequeña": True}
 
 
 # ---------- 7b/7c. Avisos de la música ----------
@@ -1078,6 +1118,125 @@ def test_un_modal_con_la_principal_minimizada_la_restaura(ctrl, qtbot, monkeypat
     ctrl.toggle_timer()                            # sin tarea activa: «Sin tarea activa»
     assert seen == [(win, False, True)]
     qtbot.waitUntil(lambda: win.windowOpacity() > 0.99, timeout=2000)
+
+
+def _situacion(ctrl, qtbot, where):
+    """Deja la app como el usuario la tendría al salir el modal: la principal
+    minimizada o en la bandeja (oculta) sin compacta, o la compacta a la vista."""
+    win = ctrl.window
+    if ctrl.compact_window is not None:
+        ctrl.compact_window.hide()
+    if win.isMinimized() or not win.isVisible():
+        win.showNormal()
+    qtbot.waitUntil(lambda: win.isVisible() and not win.isMinimized()
+                    and not win.is_fading(), timeout=3000)
+    if where == "minimizada":
+        win.showMinimized()
+        qtbot.waitUntil(win.isMinimized, timeout=2000)
+    elif where == "bandeja":
+        win.hide()
+    else:
+        ctrl.show_compact()
+    assert not (win.isVisible() and not win.isMinimized())   # la principal, fuera
+
+
+class _FakeQuitDialog:
+    """La pregunta de salir sin abrirla (BrandedDialog del controlador)."""
+    seen = []
+
+    def __init__(self, parent, *a, **k):
+        type(self).seen.append(parent)
+
+    def add_message(self, *a, **k):
+        pass
+
+    def add_buttons(self, buttons):
+        from PySide6.QtWidgets import QPushButton
+        self._buttons = [QPushButton() for _ in buttons]
+        return self._buttons
+
+    def exec(self):
+        return 0                                   # «Cancelar»
+
+    def deleteLater(self):
+        pass
+
+
+@pytest.mark.parametrize("dialog", ["sin-tarea", "salir", "asana-sin-configurar",
+                                    "eliminar", "editar", "nota", "nombre", "plan",
+                                    "bienvenida"])
+def test_ningun_modal_cuelga_de_una_ventana_que_no_se_ve(ctrl, qtbot, monkeypatch, dialog):
+    """Cada modal del controlador, con la principal minimizada, en la bandeja
+    o con la compacta: cuelga de una ventana a la vista (la compacta, o la
+    principal restaurada antes). Un modal sobre una ventana oculta o
+    minimizada bloquea la app entera, compacta incluida, sin verse."""
+    from ui.dialogs import branded_dialogs, day_plan_dialog
+    from ui.windows import welcome_farewell
+    seen = []
+
+    def record(parent, *a, **k):
+        seen.append(parent)
+    monkeypatch.setattr(branded_dialogs, "info", record)
+    monkeypatch.setattr(branded_dialogs, "confirm",
+                        lambda parent, *a, **k: (record(parent), False)[1])
+    monkeypatch.setattr(branded_dialogs, "edit_task",
+                        lambda parent, *a, **k: record(parent))
+    monkeypatch.setattr(branded_dialogs, "note_task",
+                        lambda parent, *a, **k: record(parent))
+    monkeypatch.setattr(branded_dialogs, "ask_user_name",
+                        lambda parent, *a, **k: (record(parent), "")[1])
+    monkeypatch.setattr(day_plan_dialog, "pick_day_plan",
+                        lambda parent, *a, **k: record(parent))
+    _FakeQuitDialog.seen = seen
+    monkeypatch.setattr(branded_dialogs, "BrandedDialog", _FakeQuitDialog)
+
+    class _Welcome:
+        def __init__(self, parent, *a, **k):
+            record(parent)
+
+        def exec(self):
+            return 0
+    monkeypatch.setattr(welcome_farewell, "WelcomeDialog", _Welcome)
+    monkeypatch.setattr(ctrl.asana, "is_configured", lambda: False)
+    ctrl.sync_enabled = True
+
+    def open_it():
+        settings = ctrl.data_handler.load_settings()
+        if dialog == "sin-tarea":
+            ctrl.model.active_task_id = None
+            ctrl.toggle_timer()
+        elif dialog == "salir":
+            ctrl.confirm_quit()
+        elif dialog == "asana-sin-configurar":
+            ctrl.sync_asana()
+        elif dialog == "eliminar":
+            ctrl.delete_task(ID1)
+        elif dialog == "editar":
+            ctrl.edit_task(ID1)
+        elif dialog == "nota":
+            ctrl.note_task(ID1)
+        elif dialog == "nombre":
+            settings.update(user_name='', user_name_asked=False)
+            ctrl.data_handler.save_settings(settings)
+            ctrl._ask_user_name_if_needed()
+        elif dialog == "plan":
+            ctrl.open_day_plan()
+        else:                                      # la bienvenida, sin nombre ni plan
+            settings.update(user_name='Ana', onboarding_seen=True, day_plan_on_start=False)
+            ctrl.data_handler.save_settings(settings)
+            ctrl._welcome_shown = False
+            ctrl._show_welcome()
+
+    for where in ("minimizada", "bandeja", "compacta"):
+        _situacion(ctrl, qtbot, where)
+        seen.clear()
+        open_it()
+        assert len(seen) == 1, (where, seen)
+        parent = seen[0]
+        expected = ctrl.compact_window if where == "compacta" else ctrl.window
+        assert parent is expected, (where, parent)
+        assert parent.isVisible() and not parent.isMinimized(), where
+    assert not ctrl._is_closing                    # «Cancelar» en la pregunta de salir
 
 
 def test_los_dialogos_heredan_el_siempre_visible(qtbot):
