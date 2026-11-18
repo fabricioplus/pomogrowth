@@ -642,7 +642,7 @@ def test_los_tiempos_por_defecto_no_martillean():
 
 def test_la_reconexion_del_proxy_espera_de_verdad(qtbot, emisora):
     """Con los tiempos por defecto: tras un corte, la siguiente conexión no
-    llega antes de RETRY_DELAYS_S[0] (el servidor registra el cierre)."""
+    llega antes de ~2 s (el servidor registra el cierre; antes, 0,25 s)."""
     buf = StreamBuffer()
     try:
         player = _Reproductor(buf.open(emisora.url(), 1.0, known_live=True))
@@ -650,7 +650,7 @@ def test_la_reconexion_del_proxy_espera_de_verdad(qtbot, emisora):
         emisora.cut()
         qtbot.waitUntil(lambda: len(emisora.streams()) == 2, timeout=WAIT)
         first, second = emisora.streams()
-        assert second['t_open'] - first['t_close'] >= StreamBuffer.RETRY_DELAYS_S[0] - 0.05
+        assert second['t_open'] - first['t_close'] >= 1.9
         player.stop()
     finally:
         buf.shutdown()
