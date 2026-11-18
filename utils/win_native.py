@@ -1,6 +1,7 @@
 """Integraciones Win32 (Windows 11): esquinas redondeadas DWM para ventanas
-frameless, el AppUserModelID, el mutex con nombre que ve el desinstalador y
-el «encima de todo» nativo (WS_EX_TOPMOST) de las ventanas siempre visibles.
+frameless, el AppUserModelID, el mutex con nombre que ve el desinstalador,
+si el proceso es administrador y el «encima de todo» nativo (WS_EX_TOPMOST)
+de las ventanas siempre visibles.
 
 «Encima de todo»: Qt pone WS_EX_TOPMOST al crear la ventana con
 WindowStaysOnTopHint, pero no vuelve a mirarlo. Si Windows u otra app se lo
@@ -77,6 +78,17 @@ def hold_named_mutex(name: str) -> bool:
         create.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
         _mutex = create(None, False, name)
         return bool(_mutex)
+    except Exception:
+        return False
+
+
+def is_admin() -> bool:
+    """¿Corre este proceso como administrador (elevado)? False fuera de
+    Windows o si no se puede saber."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
 

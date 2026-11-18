@@ -475,14 +475,15 @@ _SECOND = ("import sys, time; sys.path.insert(0, sys.argv[1])\n"
            "app = QApplication([])\n"
            "from services import singleton\n"
            "start = time.monotonic()\n"
-           "ok = singleton.request_show(sys.argv[2], timeout_ms=int(sys.argv[3]))\n"
-           "print(ok, round(time.monotonic() - start, 3))\n")
+           "reply = singleton.request_show(sys.argv[2], timeout_ms=int(sys.argv[3]))\n"
+           "print(reply or '-', round(time.monotonic() - start, 3))\n")
 
 
 def _second_instance(qtbot, name, timeout_ms=3000):
     """request_show() desde otro proceso, como la segunda instancia de
     verdad (hilo principal con su QApplication). Mientras, este hilo atiende
-    el canal. Devuelve (contestó, segundos que esperó)."""
+    el canal. Devuelve (respuesta: SHOWN, CLOSING o NO_ANSWER; segundos que
+    esperó)."""
     env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONDONTWRITEBYTECODE="1")
     proc = subprocess.Popen([sys.executable, "-c", _SECOND, str(V9), name, str(timeout_ms)],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -494,26 +495,71 @@ def _second_instance(qtbot, name, timeout_ms=3000):
             proc.kill()
     out = proc.stdout.read().split()
     assert proc.returncode == 0 and len(out) == 2, out
-    return out[0] == "True", float(out[1])
+    return ("" if out[0] == "-" else out[0]), float(out[1])
 
 
-def test_la_segunda_instancia_trae_al_frente_la_primera(ctrl, native, qtbot):
+def test_la_segunda_instancia_trae_al_frente_la_primera(ctrl, native, qtbot, monkeypatch):
+    from PySide6.QtNetwork import QLocalServer
     from services import singleton
     name = _channel()
     server = singleton.listen_for_show(ctrl.show_from_other_instance, name=name,
                                        parent=ctrl)
     assert server is not None
+    # Solo el mismo usuario puede pedírselo
+    assert server.socketOptions() & QLocalServer.UserAccessOption
+    win = ctrl.window
+    activated = []
+    real_activate = win.activateWindow
+    monkeypatch.setattr(win, "activateWindow",
+                        lambda: (activated.append(1), real_activate()))
     try:
         ctrl.show_compact()
         native.calls.clear()
-        answered, _seconds = _second_instance(qtbot, name)
-        assert answered
-        win = ctrl.window
+        reply, _seconds = _second_instance(qtbot, name)
+        assert reply == singleton.SHOWN
         assert win.isVisible() and not ctrl.compact_window.isVisible()
         assert (_hwnd(win), True) in native.calls  # «encima de todo» repuesto
+        assert activated                           # y activa, no solo visible
         qtbot.waitUntil(lambda: win.windowOpacity() > 0.99, timeout=2000)
     finally:
         server.close()
+
+
+def test_relanzar_durante_la_despedida_dice_que_se_esta_cerrando(ctrl, qtbot):
+    """Salir y, durante los ~8 s de la despedida, volver a abrir PomoGrowth:
+    la que se cierra no se muestra, y antes contestaba «ok» igual (la segunda
+    salía sin aviso y no quedaba ninguna abierta). Ahora contesta «closing»
+    y main.py espera a que se cierre para arrancar (test_main_con_otra_...)."""
+    from services import singleton
+    name = _channel()
+    server = singleton.listen_for_show(ctrl.show_from_other_instance, name=name,
+                                       parent=ctrl)
+    try:
+        ctrl._is_closing = True                    # lo que hace quit_with_farewell
+        ctrl.window.hide()
+        reply, _seconds = _second_instance(qtbot, name)
+        assert reply == singleton.CLOSING
+        assert not ctrl.window.isVisible()
+    finally:
+        ctrl._is_closing = False
+        server.close()
+
+
+def test_si_mostrarse_falla_no_contesta_ok(qtbot):
+    """Si on_show falla, la segunda no se va creyendo que se mostró: no hay
+    respuesta y da el aviso de siempre."""
+    from services import singleton
+    name = _channel()
+
+    def broken():
+        raise RuntimeError("roto")
+    server = singleton.listen_for_show(broken, name=name)
+    try:
+        reply, _seconds = _second_instance(qtbot, name)
+        assert reply == singleton.NO_ANSWER
+    finally:
+        server.close()
+        server.deleteLater()
 
 
 def test_el_canal_ignora_lo_que_no_es_show(ctrl, qtbot):
@@ -539,20 +585,37 @@ def test_el_canal_ignora_lo_que_no_es_show(ctrl, qtbot):
 def test_sin_nadie_escuchando_no_bloquea(qtbot):
     from services import singleton
     start = time.monotonic()
-    assert singleton.request_show(_channel(), timeout_ms=800) is False
+    assert singleton.request_show(_channel(), timeout_ms=800) == singleton.NO_ANSWER
     assert time.monotonic() - start < 1.5
 
 
-def test_una_primera_que_no_contesta_no_bloquea_el_arranque(qtbot):
+def test_el_plazo_por_defecto_es_corto():
+    """main.py llama a request_show() sin plazo: el de por defecto es el que
+    puede hacer esperar a la segunda instancia antes del aviso."""
+    import inspect
+    from services import singleton
+    assert inspect.signature(singleton.request_show).parameters['timeout_ms'].default <= 2000
+
+
+def test_una_primera_que_no_contesta_no_bloquea_el_arranque(qtbot, monkeypatch):
     """Si la primera está colgada (acepta pero no contesta), la segunda se
-    rinde en su plazo y main.py da el aviso de siempre."""
+    rinde en su plazo y main.py da el aviso de siempre. Al conectar, la
+    segunda le cede el permiso de pasar al frente (AllowSetForegroundWindow):
+    si no, la primera solo parpadearía en la barra de tareas."""
     from PySide6.QtNetwork import QLocalServer
+    from services import singleton
+    from utils import win_native
     name = _channel()
     mute = QLocalServer()
     assert mute.listen(name)
     try:
-        answered, seconds = _second_instance(qtbot, name, timeout_ms=700)
-        assert not answered and seconds < 1.5
+        reply, seconds = _second_instance(qtbot, name, timeout_ms=700)
+        assert reply == singleton.NO_ANSWER and seconds < 1.5
+        allowed = []
+        monkeypatch.setattr(win_native, "allow_foreground_to_others",
+                            lambda: allowed.append(1))
+        assert singleton.request_show(name, timeout_ms=300) == singleton.NO_ANSWER
+        assert allowed == [1]
     finally:
         mute.close()
 
@@ -567,26 +630,106 @@ def test_el_nombre_del_canal_es_por_usuario_sin_el_nombre(monkeypatch):
     assert a != b and a.startswith("PomoGrowth-") and "Ana" not in a
 
 
-@pytest.mark.parametrize("elevated, answered, code, warned, asked", [
-    (False, True, 0, False, True),     # la primera contesta: sin aviso
-    (False, False, 1, True, True),     # no contesta: el aviso de siempre
-    (True, True, 1, True, False),      # la relanzada como administrador: aviso
+@pytest.mark.parametrize("elevated, reply, freed, code, warned, asked", [
+    (False, "shown", None, 0, False, True),       # la primera se muestra: sin aviso
+    (False, "", None, 1, True, True),             # no contesta: el aviso de siempre
+    (False, "closing", True, None, False, True),  # se despedía: arranca esta
+    (False, "closing", False, 1, True, True),     # se despide y no acaba: el aviso
+    (True, "shown", None, 1, True, False),        # administradora: el aviso
 ])
-def test_main_con_otra_instancia_abierta(monkeypatch, qtbot, elevated, answered, code,
+def test_main_con_otra_instancia_abierta(monkeypatch, qtbot, elevated, reply, freed, code,
                                          warned, asked):
     import main
     from PySide6.QtWidgets import QMessageBox
     from services import singleton
-    calls = {'asked': 0, 'warned': 0}
+    calls = {'asked': [], 'warned': 0, 'waited': []}
 
     def request_show(*a, **k):
-        calls['asked'] += 1
-        return answered
+        calls['asked'].append((a, k))
+        return reply
+
+    def acquire_waiting(timeout_s=10.0, interval_s=0.25):
+        calls['waited'].append(timeout_s)
+        return freed
     monkeypatch.setattr(singleton, "request_show", request_show)
+    monkeypatch.setattr(singleton, "acquire_waiting", acquire_waiting)
     monkeypatch.setattr(QMessageBox, "warning",
                         staticmethod(lambda *a, **k: calls.__setitem__('warned', 1)))
     assert main._already_running(elevated) == code
     assert bool(calls['warned']) is warned and bool(calls['asked']) is asked
+    # Con el plazo corto de por defecto (test_el_plazo_por_defecto_es_corto)
+    assert all(c == ((), {}) for c in calls['asked'])
+    assert calls['waited'] == ([singleton.CLOSING_WAIT_S] if reply == "closing" else [])
+
+
+@pytest.mark.parametrize("acquired, relaunched, admin, already, expect", [
+    (True, False, False, None, None),        # la única: sigue, con su log de fallos
+    (False, False, False, 0, 0),             # otra la muestra: sale
+    (False, False, False, None, None),       # otra se despedía: sigue
+    (False, False, True, 1, 1),              # «Ejecutar como administrador» a mano
+    (False, True, True, 1, 1),               # la relanzada que no consiguió el puerto
+])
+def test_reclamar_la_instancia(monkeypatch, tmp_path, acquired, relaunched, admin, already,
+                               expect):
+    """main._claim_instance: solo la que se queda activa el log de fallos (una
+    segunda no escribe en el de la primera) y la administradora pasa como
+    elevada a _already_running (ve el aviso que explica qué hacer)."""
+    import main
+    from services import singleton
+    seen = {'elevated': [], 'fault': [], 'mutex': 0, 'waiting': []}
+    monkeypatch.setattr(sys, "argv", ["main.py"] + ([singleton.ELEVATED_RESTART_FLAG]
+                                                    if relaunched else []))
+    monkeypatch.setattr(singleton, "acquire", lambda: acquired)
+    monkeypatch.setattr(singleton, "acquire_waiting",
+                        lambda timeout_s=10.0, interval_s=0.25: (
+                            seen['waiting'].append(timeout_s), acquired)[1])
+    monkeypatch.setattr(main, "is_admin", lambda: admin)
+    monkeypatch.setattr(main, "_already_running",
+                        lambda elevated: (seen['elevated'].append(elevated), already)[1])
+    monkeypatch.setattr(main, "hold_named_mutex",
+                        lambda name: seen.__setitem__('mutex', seen['mutex'] + 1))
+    monkeypatch.setattr(main, "log_dir", lambda: tmp_path)
+    monkeypatch.setattr(main, "enable_fault_log",
+                        lambda folder, version="": seen['fault'].append(folder))
+    assert main._claim_instance() == expect
+    assert seen['waiting'] == ([10.0] if relaunched else [])
+    assert seen['elevated'] == ([] if acquired else [relaunched or admin])
+    stays = expect is None
+    assert seen['fault'] == ([tmp_path] if stays else [])
+    assert seen['mutex'] == (1 if stays else 0)
+
+
+def test_la_sesion_escucha_y_vigila(ctrl, qtbot, monkeypatch, tmp_path):
+    """main._serve_session: la primera atiende a una segunda instancia de
+    verdad (otro proceso) y arranca el vigía, que se para al salir."""
+    import faulthandler
+    import main
+    from PySide6.QtCore import QObject, Signal
+    from services import singleton
+
+    class _App(QObject):
+        aboutToQuit = Signal()
+    name = _channel()
+    monkeypatch.setattr(singleton, "channel_name", lambda: name)
+    handle = open(tmp_path / "fallos.log", "a", encoding="utf-8")
+    monkeypatch.setattr(main, "fault_log_file", lambda: handle)
+    app = _App()
+    ctrl.window.hide()
+    server, watchdog = main._serve_session(app, ctrl)
+    try:
+        assert server is not None and watchdog is not None
+        assert watchdog._timer.isActive()
+        reply, _seconds = _second_instance(qtbot, name)
+        assert reply == singleton.SHOWN and ctrl.window.isVisible()
+        app.aboutToQuit.emit()
+        assert not watchdog._timer.isActive()
+    finally:
+        if watchdog is not None:
+            watchdog.stop()
+        faulthandler.cancel_dump_traceback_later()
+        if server is not None:
+            server.close()
+        handle.close()
 
 
 # ---------- 7a. El aviso no tapa la compacta ----------
@@ -735,6 +878,44 @@ def test_reabrir_desde_la_compacta_pregunta_sobre_la_compacta(ctrl, qtbot):
     assert not ctrl.window.isVisible()
 
 
+@pytest.mark.parametrize("how", ["bandeja", "otra-instancia"])
+def test_mostrar_con_un_modal_sobre_la_compacta_trae_el_modal(ctrl, native, qtbot, how):
+    """«¿Reabrir?» abierto sobre la compacta y, antes de contestar, doble clic
+    en la bandeja u otra PomoGrowth. Cambiar a la principal dejaba el modal
+    colgando de la compacta oculta y la principal, bloqueada por él, forzada
+    encima: se trae al frente el modal y no se cambia de ventana."""
+    ctrl.select_task(ID1)
+    ctrl._task_by_id(ID1)['completed'] = True
+    ctrl.show_compact()
+    seen = []
+
+    def during_modal():
+        modal = QApplication.activeModalWidget()
+        raised = []
+        modal.raise_ = lambda: raised.append('raise')
+        modal.activateWindow = lambda: raised.append('activate')
+        native.calls.clear()
+        shown = (ctrl.show_from_tray() if how == "bandeja"
+                 else ctrl.show_from_other_instance())
+        seen.append(dict(
+            parent_is_compact=modal.parentWidget() is ctrl.compact_window,
+            compact=ctrl.compact_window.isVisible(), modal=modal.isVisible(),
+            main=ctrl.window.isVisible(),
+            still_modal=QApplication.activeModalWidget() is modal,
+            forced=(_hwnd(ctrl.window), True) in native.calls,
+            raised=raised, shown=shown))
+        modal.reject()
+    QTimer.singleShot(300, during_modal)
+    ctrl.compact_window.toggle_requested.emit()   # «¿Reabrir?» sobre la compacta
+    assert seen == [dict(parent_is_compact=True, compact=True, modal=True, main=False,
+                         still_modal=True, forced=False, raised=['raise', 'activate'],
+                         shown=None if how == "bandeja" else True)]
+    # Contestado el modal, mostrar la principal vuelve a ser lo de siempre
+    ctrl.show_from_tray()
+    assert ctrl.window.isVisible() and not ctrl.compact_window.isVisible()
+    qtbot.waitUntil(lambda: ctrl.window.windowOpacity() > 0.99, timeout=2000)
+
+
 def test_error_de_asana_con_la_compacta_es_un_aviso(ctrl, qtbot, monkeypatch):
     from ui.widgets import toast
     shown, modals = [], []
@@ -833,9 +1014,46 @@ def test_faulthandler_al_log_de_fallos(tmp_path, monkeypatch):
         assert handle is not None and logging_setup.fault_log_file() is handle
         assert enabled == [(handle, True)]
         assert (tmp_path / (logging_setup.FAULT_LOG_NAME + ".1")).stat().st_size > 1000
-        text = old.read_text(encoding="utf-8")
-        assert text.startswith("--- PomoGrowth 9.9.9") and f"pid {os.getpid()}" in text
+        # Un archivo nuevo empieza con la leyenda (qué es y que «Windows fatal
+        # exception» no siempre es un cierre); detrás, la línea de la sesión
+        lines = old.read_text(encoding="utf-8").splitlines()
+        assert lines[0].startswith("# ") and any("Windows fatal exception" in line
+                                                 for line in lines if line.startswith("# "))
+        header = [line for line in lines if not line.startswith("# ")]
+        assert len(header) == 1 and header[0].startswith("--- PomoGrowth 9.9.9")
+        assert f"pid {os.getpid()}" in header[0]
     finally:
+        handle.close()
+    # La sesión siguiente, sin otra leyenda
+    handle = logging_setup.enable_fault_log(tmp_path, "9.9.10")
+    handle.close()
+    lines = old.read_text(encoding="utf-8").splitlines()
+    assert len([line for line in lines if line.startswith("# Pilas")]) == 1
+    assert lines[-1].startswith("--- PomoGrowth 9.9.10")
+
+
+def test_el_vigia_no_avisa_de_un_bloqueo_que_no_hubo(tmp_path, qtbot, caplog):
+    """Que el archivo crezca no es un bloqueo: faulthandler apunta también
+    excepciones que una DLL maneja (la app sigue) y antes otra PomoGrowth
+    escribía ahí su cabecera. Solo cuenta si el hilo tardó de verdad el plazo
+    del vigía."""
+    import faulthandler
+    from utils import logging_setup
+    path = tmp_path / "fallos.log"
+    handle = open(path, "a", encoding="utf-8")
+    dog = logging_setup.start_ui_watchdog(handle, timeout_s=0.6, interval_ms=50)
+    try:
+        with caplog.at_level(logging.WARNING):
+            qtbot.wait(200)
+            with open(path, "a", encoding="utf-8") as other:   # otro escritor
+                other.write("Windows fatal exception: access violation\n\n"
+                            "Current thread 0x0001 (most recent call first):\n")
+            qtbot.wait(400)                        # el hilo nunca estuvo bloqueado
+        assert not [r for r in caplog.records if "bloqueado" in r.getMessage()]
+        assert "Thread" not in path.read_text(encoding="utf-8")   # ni pilas volcadas
+    finally:
+        dog.stop()
+        faulthandler.cancel_dump_traceback_later()
         handle.close()
 
 

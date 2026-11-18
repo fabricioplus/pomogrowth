@@ -5,14 +5,22 @@ Portado de app_ultra._setup_logging (v8).
 Diagnóstico de cierres y cuelgues (lo que el log normal no ve):
 - Cierres nativos (un fallo dentro de Qt o FFmpeg tumba el proceso sin pasar
   por Python): faulthandler escribe las pilas de todos los hilos en
-  logs/pomogrowth_fallos.log. Al arrancar se apunta una línea con la versión,
-  la hora y el pid, para saber de qué sesión es lo que venga detrás; pasado
-  de ~1 MB, el archivo se renombra a .1 y se empieza otro.
+  logs/pomogrowth_fallos.log. Lo activa main.py con enable_fault_log() solo
+  en la instancia que se queda (ganó el singleton): una segunda PomoGrowth
+  no escribe en el archivo de la primera. Al activarlo se apunta una línea
+  con la versión, la hora y el pid (el mismo pid va en la línea «iniciado»
+  del log de la sesión), para saber de qué sesión es lo que venga detrás;
+  pasado de ~1 MB, el archivo se renombra a .1 y se empieza otro.
+  Ojo: en Windows faulthandler también escribe «Windows fatal exception»
+  con excepciones que una DLL maneja y tras las que la app sigue (COM,
+  audio…). Es un cierre solo si el log de esa sesión se corta ahí.
 - Cuelgues del hilo de la interfaz: start_ui_watchdog() re-arma cada segundo
   faulthandler.dump_traceback_later. Si el hilo de la interfaz se queda más
   de ~5 s sin volver al bucle de eventos, el temporizador nativo vuelca las
   pilas en ese mismo archivo y, cuando el hilo se recupera, una línea en el
-  log de la sesión lo dice. Mientras todo va bien no escribe nada.
+  log de la sesión lo dice: solo si de verdad pasaron esos ~5 s (que el
+  archivo crezca no basta: lo de arriba también lo hace crecer). Mientras
+  todo va bien no escribe nada.
 scrub() quita de un texto lo que no debe acabar en un log (enlaces, rutas y
 títulos entre comillas angulares).
 """
@@ -33,14 +41,20 @@ UI_WATCHDOG_INTERVAL_MS = 1000
 _fault_file = None  # abierto toda la sesión: faulthandler escribe en su descriptor
 
 
+def log_dir() -> Path:
+    """La carpeta logs/: junto al exe (congelada) o en la raíz del proyecto."""
+    base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent.parent
+    return base / "logs"
+
+
 def setup_logging(version: str = "") -> Optional[str]:
-    """`version` (Config.APP_VERSION) va en la primera línea del registro."""
+    """`version` (Config.APP_VERSION) va en la primera línea del registro.
+    El log de fallos no: ver enable_fault_log()."""
     try:
-        base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent.parent
-        log_dir = base / "logs"
-        log_dir.mkdir(exist_ok=True)
+        logs = log_dir()
+        logs.mkdir(exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file = log_dir / f"pomogrowth_{ts}.log"
+        log_file = logs / f"pomogrowth_{ts}.log"
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(message)s",
@@ -66,11 +80,18 @@ def setup_logging(version: str = "") -> Optional[str]:
                 return
             logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
         sys.excepthook = _handle_exception
-        logging.info("PomoGrowth %s iniciado", version or "(sin versión)")
-        enable_fault_log(log_dir, version)
+        logging.info("PomoGrowth %s iniciado (pid %d)", version or "(sin versión)",
+                     os.getpid())
         return str(log_file)
     except Exception:
         return None
+
+
+_FAULT_LOG_LEGEND = (
+    "# Pilas de PomoGrowth: cierres nativos y bloqueos de más de ~5 s del hilo de\n"
+    "# la interfaz. «Windows fatal exception» también sale con excepciones que\n"
+    "# Windows maneja sin cerrar la app: es un cierre solo si el log de esa\n"
+    "# sesión (el mismo pid) se corta ahí.\n")
 
 
 def enable_fault_log(log_dir: Path, version: str = ""):
@@ -86,6 +107,8 @@ def enable_fault_log(log_dir: Path, version: str = ""):
         pass
     try:
         handle = open(path, "a", encoding="utf-8", errors="replace")
+        if handle.tell() == 0:
+            handle.write(_FAULT_LOG_LEGEND)  # al estrenar el archivo
         handle.write(f"--- PomoGrowth {version or '(sin versión)'} · "
                      f"{datetime.now():%Y-%m-%d %H:%M:%S} · pid {os.getpid()} ---\n")
         handle.flush()  # faulthandler escribe directo al descriptor, sin este búfer
@@ -97,7 +120,7 @@ def enable_fault_log(log_dir: Path, version: str = ""):
 
 
 def fault_log_file():
-    """El archivo de fallos de la sesión (None sin setup_logging o si falló)."""
+    """El archivo de fallos de la sesión (None sin enable_fault_log o si falló)."""
     return _fault_file
 
 
@@ -142,9 +165,11 @@ class _UiWatchdog:
         gap = now - (self._last if self._last is not None else now)
         self._last = now
         size = self._file_size()
-        if size > self._size:
+        if size > self._size and gap >= self.timeout_s:
             # El temporizador nativo saltó: el hilo estuvo bloqueado y sus
-            # pilas ya están en el archivo de fallos
+            # pilas ya están en el archivo de fallos. Sin ese hueco, lo que
+            # creció fue otra cosa (una excepción manejada que faulthandler
+            # apunta igual, otro proceso): no hubo bloqueo que avisar
             logging.warning("El hilo de la interfaz estuvo bloqueado ~%.1f s; "
                             "sus pilas están en %s", gap, FAULT_LOG_NAME)
         self._size = size

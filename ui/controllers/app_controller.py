@@ -1588,21 +1588,22 @@ class AppController(QObject):
         con la compacta abierta, quedaban las dos)."""
         self.show_normal()
 
-    def show_from_other_instance(self) -> None:
+    def show_from_other_instance(self) -> bool:
         """Se abrió otra PomoGrowth con esta en marcha (services/singleton):
         esta sale al frente, la principal sin la compacta, con su «encima de
-        todo» repuesto y activa. Durante el splash del arranque solo se
-        adelanta el splash: la principal llega cuando termine."""
+        todo» repuesto y activa (show_normal → fade_show). Durante el splash
+        del arranque solo se adelanta el splash: la principal llega cuando
+        termine. False si se está cerrando (la despedida): no se muestra, y
+        la otra espera a que esta salga para arrancar ella."""
         if self._is_closing:
-            return
+            return False
         logging.info("Otra instancia pidió mostrar la ventana")
         splash = getattr(self, '_splash', None)
         if splash is not None:
             splash.raise_()
-            return
-        self.show_normal()  # fade_show ya la eleva, la activa y repone el topmost
-        self.window.raise_()
-        self.window.activateWindow()
+            return True
+        self.show_normal()
+        return True
 
     def _toggle_topmost_from_tray(self, checked: bool) -> None:
         """«Siempre visible» de la bandeja: guarda la opción y la aplica a la
@@ -1815,9 +1816,29 @@ class AppController(QObject):
         self._sync_compact()
 
     def show_normal(self) -> None:
+        """La principal a la vista, sin la compacta. Con un modal abierto
+        sobre la compacta («¿Reabrir?», «Sin tarea activa») no se cambia de
+        ventana: ocultar la compacta lo dejaba colgando de una ventana oculta
+        y la principal salía encima de él, bloqueada por un modal tapado. Se
+        trae al frente el modal, que es lo que espera respuesta."""
+        modal = self._modal_over_compact()
+        if modal is not None:
+            modal.raise_()
+            modal.activateWindow()
+            return
         if self.compact_window:
             self.compact_window.hide()
         self.window.fade_show()
+
+    def _modal_over_compact(self):
+        """El modal abierto que cuelga de la compacta a la vista, o None."""
+        from PySide6.QtWidgets import QApplication
+        modal = QApplication.activeModalWidget()
+        compact = self.compact_window
+        if modal is None or compact is None or not compact.isVisible():
+            return None
+        parent = modal.parentWidget()
+        return modal if parent is not None and parent.window() is compact else None
 
     def _sync_compact(self) -> None:
         if not (self.compact_window and self.compact_window.isVisible()):
