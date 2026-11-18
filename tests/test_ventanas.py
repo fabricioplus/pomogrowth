@@ -18,8 +18,15 @@ impedían recuperarlo o dejaban la app bloqueada:
 Y el diagnóstico para la próxima vez: faulthandler, el vigía del hilo de la
 interfaz y el log de la música.
 
+De la revisión de esos arreglos: reponer el «encima de todo» no puede dejar
+la ventana encima de su propio modal; mostrar la principal con un modal
+sobre la compacta trae el modal; relanzar durante la despedida arranca otra;
+la administradora a mano ve el aviso; el vigía no avisa de bloqueos que no
+hubo; la bienvenida espera al error de Asana del arranque; y la racha de
+«paso a la siguiente» se cierra al pausar o elegir otra.
+
 Offscreen no tiene HWND: el «encima de todo» nativo se simula (fixture
-`native`), salvo un test con una ventana Win32 real, oculta y sin activar.
+`native`), salvo los tests con ventanas Win32 reales, ocultas y sin activar.
 
 Ejecutar desde la raíz del repositorio:
     QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ventanas.py -q
