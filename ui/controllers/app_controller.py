@@ -3,7 +3,16 @@
 Equivalente Qt del AppController de v8 (fase 1: timer + tareas). El bucle de
 250 ms es un QTimer; las actualizaciones de tarjetas son in-place vía el
 registro del TaskListPanel (misma filosofía que la reforma de fluidez de v8).
+
+Ventanas: ningún modal cuelga de una ventana que no se ve (_modal_parent:
+la compacta si es la que está a la vista; si no, la principal, restaurada
+antes si hacía falta), porque un modal invisible bloquea también la
+compacta. Los errores de un sync en segundo plano con la principal fuera de
+la vista van a un aviso o a la bandeja, no a un modal. Cada ~2 s el tick
+comprueba que la principal (con «Siempre visible») y la compacta conservan
+el «encima de todo» nativo y lo reponen si Windows u otra app se lo quitó.
 """
+import logging
 import queue
 import threading
 import time
@@ -24,6 +33,8 @@ from ui.widgets import toast
 from ui.widgets.task_list import TaskListPanel
 from ui.widgets.timer_panel import TimerPanel
 from ui.widgets.xp_bar import XpBar
+from utils import win_native
+from utils.logging_setup import scrub
 
 # El panel de tareas se acopla a la izquierda o a la derecha del timer
 # (arriba/abajo se quitaron en v9.2.2: no quedaban bien)
@@ -119,7 +130,7 @@ class AppController(QObject):
         self.asana.status.connect(tp.set_sync_status)
         self.asana.connection_state.connect(self._on_connection_state)
         self.asana.finished.connect(self._on_sync_finished)
-        self.asana.error.connect(lambda msg: dialogs.info(self.window, "Asana", msg))
+        self.asana.error.connect(self._on_asana_error)
         # Cola de cambios hacia Asana: solo se envía con el sync permitido
         self.asana.push_allowed = self._asana_sync_allowed
         self.asana.pushed.connect(self._on_asana_pushed)
@@ -153,11 +164,21 @@ class AppController(QObject):
         window.title_bar.music_requested.connect(self.open_music)
         mini = tp.mini_player
         mini.toggle_requested.connect(self.music.toggle_pause)
+        # «Siguiente» a mano empieza una racha de fallos nueva (antes que el
+        # salto, por si falla en el acto)
+        mini.next_requested.connect(self._end_music_streak)
         mini.next_requested.connect(self.music.next)
         mini.open_requested.connect(self.open_music)
         self.music.now_playing_changed.connect(self._refresh_mini_player)
         self.music.playing_changed.connect(self._refresh_mini_player)
-        self.music.error_occurred.connect(self._on_music_error)
+        # Avisos de la música: uno en pantalla a la vez (el nuevo sustituye
+        # al anterior) y, sin ventana a la vista, a la bandeja con límite
+        self._music_toast = None
+        self._music_skip_warned = False   # ya se avisó de un «paso a la siguiente»
+        self._music_tray_at = None        # última notificación de la bandeja
+        self._music_state_seen = self.music.state
+        self.music.error_occurred.connect(self._on_music_service_error)
+        self.music.state_changed.connect(self._on_music_state)
 
         # --- Sonidos de ambiente: su mezclador vive en el diálogo de Música y
         # suenan a la vez que ella; el punto del botón Música dice si suenan.
@@ -246,6 +267,7 @@ class AppController(QObject):
         self._update_timer_display()
         self._update_total_today()
 
+        self._topmost_ticks = 0  # ticks desde la última comprobación del «encima de todo»
         self._tick_timer = QTimer(self)
         self._tick_timer.setInterval(250)
         self._tick_timer.timeout.connect(self._tick)
@@ -253,6 +275,11 @@ class AppController(QObject):
 
     # ================= Timer =================
     def _tick(self) -> None:
+        # «Siempre visible» de verdad: cada ~2 s (también con el timer parado)
+        self._topmost_ticks += 1
+        if self._topmost_ticks >= self.TOPMOST_CHECK_TICKS:
+            self._topmost_ticks = 0
+            self._keep_on_top()
         # Cambio de día con la app abierta: reabrir tareas fijas completadas
         today = date.today()
         if today != self._last_seen_date:
@@ -359,12 +386,14 @@ class AppController(QObject):
 
     def toggle_timer(self) -> None:
         if not self.model.active_task_id and not self.model.is_break_time:
-            dialogs.info(self._feedback_window(), "Sin tarea activa",
+            dialogs.info(self._modal_parent(), "Sin tarea activa",
                          "Selecciona una tarea de la lista para empezar a trabajar.")
             return
         active = self._task_by_id(self.model.active_task_id)
         if active and active.get('completed') and not self.model.is_break_time:
-            if dialogs.confirm(self.window, "Tarea completada",
+            # Se puede pedir desde la compacta (p. ej. un sync la completó):
+            # la pregunta sale sobre ella, no sobre la principal oculta
+            if dialogs.confirm(self._modal_parent(), "Tarea completada",
                                f"«{active.get('name', '')}» ya está completada.\n"
                                "¿Quieres reabrirla para seguir trabajando?",
                                ok_text="Reabrir"):
@@ -543,6 +572,18 @@ class AppController(QObject):
                 and self.compact_window.isVisible()):
             return self.compact_window
         return self.window
+
+    def _modal_parent(self):
+        """Ventana de la que cuelga un modal del controlador: la de los avisos
+        (_feedback_window) y, si es la principal y está minimizada u oculta,
+        restaurada antes. Un modal sobre una ventana que no se ve bloquea toda
+        la app, compacta incluida, sin que se vea por qué (en Windows, los
+        diálogos de una ventana minimizada se esconden con ella)."""
+        win = self._feedback_window()
+        if (win is self.window and not self._is_closing
+                and (win.isMinimized() or not win.isVisible())):
+            self.show_normal()
+        return win
 
     def _log_and_refresh(self, elapsed: float, chunk_type: str,
                          cycle_completed: bool = False,
@@ -754,7 +795,7 @@ class AppController(QObject):
                                "⚙ Configuración → Asana", duration=2500)
             return
         if not self.asana.is_configured():
-            dialogs.info(self.window, "Asana",
+            dialogs.info(self._modal_parent(), "Asana",
                          "Configura primero la conexión con Asana en ⚙ Configuración\n"
                          "(API Token, Assignee GID y workspace/proyectos).")
             return
@@ -874,6 +915,27 @@ class AppController(QObject):
             self.timer_panel.connection_label.setStyleSheet(f"color: {t.danger};")
             self.timer_panel.set_sync_state('offline' if self.sync_enabled else 'off')
 
+    def _on_asana_error(self, message: str, _deferred: bool = False) -> None:
+        """Error de un sync de Asana. Con la principal a la vista, el aviso
+        modal de siempre. Con ella minimizada u oculta (un sync en segundo
+        plano) un modal no se vería y bloquearía la app, compacta incluida:
+        un aviso sobre la compacta si está a la vista y, si no, una
+        notificación de la bandeja. Durante el splash del arranque, el aviso
+        espera a que se muestre la principal (_end_splash va justo después)."""
+        if self._is_closing:
+            return
+        if getattr(self, '_splash', None) is not None and not _deferred:
+            QTimer.singleShot(0, self, lambda: self._on_asana_error(message, True))
+            return
+        win = self.window
+        compact = self.compact_window
+        if win.isVisible() and not win.isMinimized():
+            dialogs.info(win, "Asana", message)
+        elif compact is not None and compact.isVisible():
+            toast.show_warning(compact, f"Asana: {message}", duration=6000)
+        else:
+            self.tray.showMessage("PomoGrowth — Asana", message, self.tray.icon(), 8000)
+
     # ================= Settings =================
     def open_settings(self, tab: str = '') -> None:
         """`tab`: texto de la pestaña con la que abrir (p. ej. "ClickUp")."""
@@ -909,19 +971,67 @@ class AppController(QObject):
         finally:
             self._music_dialog = None
             dlg.deleteLater()
+            # Lo que falle a partir de ahora (quizá otra lista) se avisa de nuevo
+            self._end_music_streak()
 
     def _refresh_mini_player(self, *_args) -> None:
         self.timer_panel.mini_player.show_now_playing(self.music.current(),
                                                      self.music.is_playing)
 
-    def _on_music_error(self, message: str) -> None:
-        """Errores de la música con el diálogo cerrado (p. ej. una radio que no
-        vuelve): un aviso breve si hay una ventana a la vista."""
+    # Sin ninguna ventana a la vista, como mucho una notificación de la
+    # bandeja por error de la música cada tanto (s)
+    MUSIC_TRAY_MIN_INTERVAL_S = 60.0
+
+    def _on_music_state(self, state: str) -> None:
+        """Transiciones del reproductor, al log: con la app instalada es lo que
+        dirá qué hizo la radio al cortarse. Se cierra la racha de fallos
+        seguidos al volver a sonar y al pausar o parar (el usuario, o el
+        enfoque con «solo durante el enfoque»): lo que falle después es otra
+        racha y se avisa. Entre salto y salto el servicio pasa por 'loading',
+        que no la cierra."""
+        logging.info("Música: %s → %s", self._music_state_seen, state)
+        self._music_state_seen = state
+        if state in ('playing', 'paused', 'idle'):
+            self._end_music_streak()
+
+    def _end_music_streak(self) -> None:
+        """El próximo «paso a la siguiente» vuelve a avisar."""
+        self._music_skip_warned = False
+
+    def _on_music_service_error(self, message: str) -> None:
+        """Errores de MusicService: al log (sin enlaces ni títulos) y al aviso.
+        Si fallan varias pistas seguidas, solo se avisa del primer «paso a la
+        siguiente» (el servicio sigue queriendo sonar: is_playing); el aviso
+        final, cuando se rinde, sustituye a ese."""
+        logging.warning("Música: %s", scrub(message))
+        skipping = self.music.state == 'error' and self.music.is_playing
+        if skipping and self._music_skip_warned:
+            return
+        self._music_skip_warned = skipping
+        self._on_music_error(message, final=not skipping)
+
+    def _on_music_error(self, message: str, final: bool = True) -> None:
+        """Errores de la música (y del ambiente) con el diálogo cerrado (p. ej.
+        una radio que no vuelve): un aviso breve en la ventana a la vista, que
+        sustituye al anterior en vez de apilarse (sobre la compacta sale fuera
+        de su tarjeta: ui/widgets/toast). Sin ventana a la vista (minimizada,
+        en la bandeja), los errores finales van a una notificación de la
+        bandeja, con límite de frecuencia; los «paso a la siguiente», no."""
         if self._music_dialog is not None or self._is_closing:
             return
         win = self._feedback_window()
         if win.isVisible() and not win.isMinimized():
-            toast.show_warning(win, message, duration=4000)
+            toast.dismiss(self._music_toast)
+            self._music_toast = toast.show_warning(win, message, duration=4000)
+            return
+        if not final:
+            return
+        now = time.monotonic()
+        last = self._music_tray_at
+        if last is not None and now - last < self.MUSIC_TRAY_MIN_INTERVAL_S:
+            return
+        self._music_tray_at = now
+        self.tray.showMessage("PomoGrowth — música", message, self.tray.icon(), 6000)
 
     def _refresh_ambient_indicator(self, *_args) -> None:
         """El punto del botón Música (y su tooltip): ambiente sonando o
@@ -979,12 +1089,7 @@ class AppController(QObject):
                                    self.model.pomodoros_per_cycle)
         # Ventana
         win = self.window
-        wants_top = bool(s.get('always_on_top', True))
-        if bool(win.windowFlags() & Qt.WindowStaysOnTopHint) != wants_top:
-            visible = win.isVisible()
-            win.setWindowFlag(Qt.WindowStaysOnTopHint, wants_top)
-            if visible:
-                win.show()  # re-aplicar flags requiere re-mostrar
+        self._apply_window_top(bool(s.get('always_on_top', True)))
         win.set_base_opacity(s.get('window_opacity', 1.0))
         Config.N8N_WEBHOOK_URL = s.get('n8n_webhook_url', '')
         # Sonidos del temporizador (sección «Sonidos» de Ajustes)
@@ -1000,6 +1105,51 @@ class AppController(QObject):
             self.asana.cancel()
             self.timer_panel.set_sync_state('idle' if self.sync_enabled else 'off')
         self.destinations.refresh()  # botones de Asana/ClickUp del alta
+
+    def _apply_window_top(self, wants_top: bool) -> None:
+        """«Siempre visible» de la principal (Ajustes o la bandeja).
+        - Cambiar el flag de Qt obliga a volver a mostrarla: minimizada, se
+          vuelve a mostrar minimizada (antes se restauraba de golpe).
+        - Con el flag ya como toca, se aplica igualmente al estado nativo:
+          así «Guardar» arregla una ventana que Windows dejó sin él.
+        - La marca de la bandeja queda como la opción, sin disparar su señal:
+          su clic hace lo que muestra."""
+        win = self.window
+        if bool(win.windowFlags() & Qt.WindowStaysOnTopHint) != wants_top:
+            visible, minimized = win.isVisible(), win.isMinimized()
+            win.setWindowFlag(Qt.WindowStaysOnTopHint, wants_top)
+            if minimized:
+                win.showMinimized()
+            elif visible:
+                win.show()  # re-aplicar flags requiere re-mostrar
+        elif win.isVisible() and not win.isMinimized():
+            hwnd = int(win.winId())
+            if wants_top:
+                win_native.keep_topmost(hwnd, "principal", force=True)
+            elif win_native.is_topmost(hwnd):
+                win_native.set_topmost(hwnd, False)
+        action = getattr(self, '_topmost_action', None)
+        if action is not None and action.isChecked() != wants_top:
+            blocked = action.blockSignals(True)
+            action.setChecked(wants_top)
+            action.blockSignals(blocked)
+
+    # «Siempre visible»: cada cuántos ticks (de 250 ms) se mira si la
+    # principal o la compacta perdieron el «encima de todo» nativo
+    TOPMOST_CHECK_TICKS = 8
+
+    def _keep_on_top(self) -> None:
+        """Repone el «encima de todo» que Windows u otra app haya quitado: a
+        la principal si tiene «Siempre visible», se ve, no está minimizada y
+        no se está desvaneciendo; a la compacta si se ve. Una ventana que ya
+        lo tiene no se toca (ni se reordena ni se activa): win_native."""
+        win = self.window
+        if (win.windowFlags() & Qt.WindowStaysOnTopHint and win.isVisible()
+                and not win.isMinimized() and not win.is_fading()):
+            win_native.keep_topmost(int(win.winId()), "principal")
+        compact = self.compact_window
+        if compact is not None and compact.isVisible():
+            win_native.keep_topmost(int(compact.winId()), "compacta")
 
     # ================= Webhook / n8n =================
     @staticmethod
@@ -1268,8 +1418,18 @@ class AppController(QObject):
         lines.append("Elige una tarea y arranca tu primer pomodoro.")
         return lines
 
+    # Con otro modal abierto, la bienvenida lo vuelve a mirar cada tanto (ms)
+    WELCOME_RETRY_MS = 300
+
     def _show_welcome(self) -> None:
         if self._welcome_shown or self._is_closing:
+            return
+        from PySide6.QtWidgets import QApplication
+        if QApplication.activeModalWidget() is not None:
+            # Otro modal abierto (p. ej. el error de Asana del arranque, que
+            # sale al terminar el splash): la bienvenida espera a que se
+            # cierre, uno detrás de otro y no apilados encima del error
+            QTimer.singleShot(self.WELCOME_RETRY_MS, self, self._show_welcome)
             return
         self._welcome_shown = True
         self._ask_user_name_if_needed()  # antes del plan o la bienvenida
@@ -1290,7 +1450,7 @@ class AppController(QObject):
             self.open_day_plan()
             return
         from ui.windows.welcome_farewell import WelcomeDialog
-        WelcomeDialog(self.window, self._welcome_lines(), user_name=self._user_name(),
+        WelcomeDialog(self._modal_parent(), self._welcome_lines(), user_name=self._user_name(),
                       streak=self._usage_streak()).exec()
 
     # ================= Nombre y racha de uso =================
@@ -1319,7 +1479,7 @@ class AppController(QObject):
         settings = self.data_handler.load_settings()
         if self._user_name() or settings.get('user_name_asked'):
             return
-        name = dialogs.ask_user_name(self._feedback_window())
+        name = dialogs.ask_user_name(self._modal_parent())
         settings = self.data_handler.load_settings()
         if name:
             settings['user_name'] = name
@@ -1375,7 +1535,7 @@ class AppController(QObject):
             preselected = self.data_handler.get_day_plan()
         else:
             preselected = day_plan.default_selection(suggestions)
-        ids = pick_day_plan(self._feedback_window(), tasks, suggestions, preselected,
+        ids = pick_day_plan(self._modal_parent(), tasks, suggestions, preselected,
                             user_name=self._user_name(), streak=self._usage_streak())
         if ids is None:
             return
@@ -1445,13 +1605,36 @@ class AppController(QObject):
                               self.tray.icon(), 2500)
 
     def show_from_tray(self) -> None:
-        self.window.fade_show()
+        """«Mostrar PomoGrowth» o doble clic en la bandeja: el mismo camino
+        que el botón de la compacta (antes solo mostraba la principal y,
+        con la compacta abierta, quedaban las dos)."""
+        self.show_normal()
+
+    def show_from_other_instance(self) -> bool:
+        """Se abrió otra PomoGrowth con esta en marcha (services/singleton):
+        esta sale al frente, la principal sin la compacta, con su «encima de
+        todo» repuesto y activa (show_normal → fade_show). Durante el splash
+        del arranque solo se adelanta el splash: la principal llega cuando
+        termine. False si se está cerrando (la despedida): no se muestra, y
+        la otra espera a que esta salga para arrancar ella."""
+        if self._is_closing:
+            return False
+        logging.info("Otra instancia pidió mostrar la ventana")
+        splash = getattr(self, '_splash', None)
+        if splash is not None:
+            splash.raise_()
+            return True
+        self.show_normal()
+        return True
 
     def _toggle_topmost_from_tray(self, checked: bool) -> None:
+        """«Siempre visible» de la bandeja: guarda la opción y la aplica a la
+        principal, sin lo demás de «Guardar» en Ajustes (ni su aviso
+        «Configuración guardada»)."""
         settings = self.data_handler.load_settings()
         settings['always_on_top'] = bool(checked)
         self.data_handler.save_settings(settings)
-        self.apply_settings(settings)
+        self._apply_window_top(bool(checked))
 
     def confirm_quit(self) -> None:
         """La X de la cabecera, Alt+F4 y «Cerrar» de la bandeja: salir del
@@ -1484,7 +1667,7 @@ class AppController(QObject):
         else:
             message = ("PomoGrowth se cerrará por completo. Si solo quieres"
                        " apartarlo, minimízalo.")
-        dlg = dialogs.BrandedDialog(self._feedback_window(),
+        dlg = dialogs.BrandedDialog(self._modal_parent(),
                                     "¿Estás seguro de salir del programa?",
                                     icon="circle-help")
         dlg.add_message(message)
@@ -1643,16 +1826,41 @@ class AppController(QObject):
         geo = self.window.geometry()
         self.compact_window.move(geo.right() - self.compact_window.width() - 20,
                                  geo.top() + 20)
+        fading = self.window.is_fading()
         self.window.hide()
+        if fading:
+            # A mitad del desvanecido de minimizar: cortarlo (ya oculta, sin
+            # un fotograma opaco), o su final la volvería a mostrar minimizada
+            self.window.stop_fade()
         self.compact_window.show()
         # Sincronizar DESPUÉS de show(): el guard isVisible() de _sync_compact
         # convertía el sync pre-show en no-op y la mini abría con '25:00/TRABAJO'
         self._sync_compact()
 
     def show_normal(self) -> None:
+        """La principal a la vista, sin la compacta. Con un modal abierto
+        sobre la compacta («¿Reabrir?», «Sin tarea activa») no se cambia de
+        ventana: ocultar la compacta lo dejaba colgando de una ventana oculta
+        y la principal salía encima de él, bloqueada por un modal tapado. Se
+        trae al frente el modal, que es lo que espera respuesta."""
+        modal = self._modal_over_compact()
+        if modal is not None:
+            modal.raise_()
+            modal.activateWindow()
+            return
         if self.compact_window:
             self.compact_window.hide()
         self.window.fade_show()
+
+    def _modal_over_compact(self):
+        """El modal abierto que cuelga de la compacta a la vista, o None."""
+        from PySide6.QtWidgets import QApplication
+        modal = QApplication.activeModalWidget()
+        compact = self.compact_window
+        if modal is None or compact is None or not compact.isVisible():
+            return None
+        parent = modal.parentWidget()
+        return modal if parent is not None and parent.window() is compact else None
 
     def _sync_compact(self) -> None:
         if not (self.compact_window and self.compact_window.isVisible()):
@@ -1962,7 +2170,7 @@ class AppController(QObject):
         task = self._task_by_id(task_id)
         if not task:
             return
-        if not dialogs.confirm(self.window, "Eliminar tarea",
+        if not dialogs.confirm(self._modal_parent(), "Eliminar tarea",
                                f"¿Eliminar «{task.get('name', '')}»?\n"
                                "El tiempo registrado se conserva en las estadísticas.",
                                ok_text="Eliminar", danger=True):
@@ -1997,7 +2205,7 @@ class AppController(QObject):
             "El nombre también se cambia en Asana. Las etiquetas que añadas "
             "aquí son solo de PomoGrowth.")
         shown_name = task.get('name', '')
-        result = dialogs.edit_task(self.window, shown_name,
+        result = dialogs.edit_task(self._modal_parent(), shown_name,
                                    task.get('tags') or [], recurring=current_cycle,
                                    hint=hint)
         if result is None:
@@ -2023,7 +2231,7 @@ class AppController(QObject):
         task = self._task_by_id(task_id)
         if not task:
             return
-        note = dialogs.note_task(self.window, task.get('name', ''),
+        note = dialogs.note_task(self._modal_parent(), task.get('name', ''),
                                  task.get('notes', '') or '')
         if note is None:
             return

@@ -6,6 +6,9 @@ Esquinas redondeadas: DWM (utils/win_native).
 Minimizar / ocultar / mostrar con desvanecido: una ventana sin marco no tiene
 las animaciones de Windows y el cambio era brusco.
 Alt+F4: pasa por `close_guard` (el controller pregunta si salir, como la X).
+Siempre visible: al mostrarla (fade_show) o restaurarla de minimizada se
+repone el «encima de todo» nativo (utils/win_native.keep_topmost), por si
+Windows u otra app se lo quitó mientras no se veía.
 """
 import ctypes
 from ctypes import wintypes
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QMainWindow, QSplitter,
 from ui.theme.tokens import ThemeManager, tokens
 from ui.widgets.progress_gradient import ProgressGradient
 from ui.widgets.title_bar import TitleBar
+from utils import win_native
 from utils.win_native import round_corners
 
 RESIZE_MARGIN = 6
@@ -52,6 +56,7 @@ class MainWindow(QMainWindow):
         self.place(settings.get('window_geometry'))
         self._fade_anim = None
         self._restore_fade_pending = False
+        self._was_minimized = False  # para reponer el «encima de todo» al restaurar
         # Cierre del sistema (Alt+F4): callable → True para dejar cerrar
         # (ver closeEvent). Lo pone el controller
         self.close_guard = None
@@ -150,12 +155,38 @@ class MainWindow(QMainWindow):
         self._fade_anim = anim
         anim.start()
 
+    def is_fading(self) -> bool:
+        """¿Hay un desvanecido en curso (o una restauración que lo espera)?"""
+        return self._restore_fade_pending or (
+            self._fade_anim is not None
+            and self._fade_anim.state() == QPropertyAnimation.Running)
+
+    def stop_fade(self) -> None:
+        """Corta el desvanecido en curso sin su final (ni minimizar ni ocultar)
+        y deja la opacidad elegida: p. ej. al pasar a la compacta a mitad del
+        desvanecido de minimizar."""
+        if self._fade_anim is not None:
+            self._fade_anim.stop()
+        self._restore_fade_pending = False
+        self.setWindowOpacity(self._base_opacity)
+
+    def reassert_topmost(self) -> None:
+        """Con «Siempre visible», repone el «encima de todo» nativo sin
+        activarla (inofensivo fuera de Windows). Al mostrarla o restaurarla."""
+        if self.windowFlags() & Qt.WindowStaysOnTopHint:
+            win_native.keep_topmost(int(self.winId()), "principal", force=True)
+
     def fade_minimize(self) -> None:
         """Se desvanece y después se minimiza (sin marco, Windows no anima)."""
         if self.isMinimized():
             return
 
         def done():
+            if not self.isVisible():
+                # La ocultaron durante el desvanecido (p. ej. la compacta):
+                # minimizarla ahora la volvería a mostrar, minimizada
+                self.setWindowOpacity(self._base_opacity)
+                return
             self.showMinimized()
             # Ya minimizada, recuperar la opacidad: así la miniatura de la
             # barra de tareas no sale vacía
@@ -189,6 +220,7 @@ class MainWindow(QMainWindow):
             self._fade(0.0, self._base_opacity, FADE_IN_MS)
         self.raise_()
         self.activateWindow()
+        self.reassert_topmost()
 
     def _ensure_opaque(self) -> None:
         """Red de seguridad: nunca dejar la ventana invisible."""
@@ -215,10 +247,16 @@ class MainWindow(QMainWindow):
         return super().nativeEvent(event_type, message)
 
     def changeEvent(self, event):
-        if (event.type() == QEvent.WindowStateChange and not self.isMinimized()
-                and self._restore_fade_pending):
-            self._restore_fade_pending = False
-            self._fade(0.0, self._base_opacity, FADE_IN_MS)
+        if event.type() == QEvent.WindowStateChange:
+            minimized = self.isMinimized()
+            if not minimized and self._restore_fade_pending:
+                self._restore_fade_pending = False
+                self._fade(0.0, self._base_opacity, FADE_IN_MS)
+            if self._was_minimized and not minimized:
+                # Restaurada (barra de tareas, Alt+Tab, bandeja): mientras
+                # estaba minimizada pudo perder el «encima de todo»
+                self.reassert_topmost()
+            self._was_minimized = minimized
         super().changeEvent(event)
 
     def geometry_settings(self) -> dict:
