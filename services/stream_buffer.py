@@ -489,7 +489,11 @@ class _Session:
             conn = _Conn(first=self.first_data is None)
             if self.started is None:
                 self.started = time.monotonic()
-        headers = {'User-Agent': self.user_agent, 'Accept-Encoding': 'identity'}
+        # «Connection: close», como FFmpeg: si el origen redirige (bigFM a su
+        # CDN), la conexión del 302 no queda abierta en el pool de requests
+        # junto a la del audio. Cada reconexión abre otra de todos modos
+        headers = {'User-Agent': self.user_agent, 'Accept-Encoding': 'identity',
+                   'Connection': 'close'}
         if self.want_icy:
             headers['Icy-MetaData'] = '1'
         try:

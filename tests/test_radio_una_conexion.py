@@ -26,6 +26,7 @@ import socket
 import sys
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -204,6 +205,58 @@ def test_proxy_una_conexion_y_los_titulos_en_ella(qtbot, emisora, proxy):
     [rec] = emisora.streams()
     assert (rec['ua'], rec['icy']) == (UA, '1') and emisora.max_active == 1
     player.stop()
+
+
+class _Redireccion(BaseHTTPRequestHandler):
+    """Como stream.bigfm.de: 302 a su CDN con HTTP/1.1 y keep-alive. Cuenta
+    las conexiones que el cliente deja abiertas tras el 302."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *_args):
+        pass
+
+    def handle(self):
+        with self.server.lock:
+            self.server.open += 1
+        try:
+            super().handle()
+        finally:
+            with self.server.lock:
+                self.server.open -= 1
+
+    def do_GET(self):  # noqa: N802 - nombre de la API de http.server
+        with self.server.lock:
+            self.server.asked.append(self.headers.get('Connection') or '')
+        self.send_response(302)
+        self.send_header('Location', self.server.target)
+        self.send_header('Content-Length', '0')
+        self.end_headers()
+
+
+def test_una_redireccion_no_deja_abierta_la_conexion_del_302(qtbot, emisora, proxy):
+    """I1 con una emisora que redirige (bigFM → su CDN, medido con la real:
+    la conexión del 302 seguía abierta junto a la del audio). El proxy pide
+    «Connection: close», como FFmpeg: tras el 302 no queda ninguna abierta
+    con el primer host mientras suena el segundo."""
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Redireccion)
+    srv.daemon_threads = True
+    srv.lock = threading.Lock()
+    srv.open, srv.asked, srv.target = 0, [], emisora.url()
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    try:
+        url = proxy.open(f"http://127.0.0.1:{srv.server_address[1]}/lofifocus/aac-128/",
+                         0, known_live=True)
+        player = _Reproductor(url)
+        qtbot.waitUntil(lambda: len(player.data) > 100000, timeout=WAIT)
+        qtbot.waitUntil(lambda: srv.open == 0, timeout=3000)
+        assert [a.lower() for a in srv.asked] == ['close']
+        assert emisora.max_active == 1 and len(emisora.streams()) == 1
+        player.stop()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(5)
 
 
 def test_el_titulo_llega_con_su_audio(qtbot, emisora, proxy):
