@@ -4,7 +4,8 @@ Cubre el modelo (acumulado entre pausas, sin tope, cuenta hacia arriba), la
 suspensión a mitad de una sesión libre, el registro (chunks con mode 'free'
 que cuentan como tiempo enfocado pero no como pomodoros), las recompensas
 proporcionales con su umbral de 5 min, el selector «Pomodoro | Libre», el
-botón «Terminar sesión» y la persistencia del último modo elegido.
+botón «Parar» y la persistencia del último modo elegido (el resto de «Parar»,
+en tests/test_parar_sesion.py).
 
 Ejecutar desde la raíz del repositorio:
     QT_QPA_PLATFORM=offscreen python -m pytest tests/test_free_mode.py -q
@@ -284,8 +285,8 @@ def test_selector_cambia_a_libre_y_lo_recuerda(ctrl, qtbot, tmp_path):
     assert tp.time_label.text() == "00:00"
     assert not tp.cycle_dots.isVisibleTo(tp)            # sin puntos del ciclo
     assert not tp.skip_btn.isVisibleTo(tp)              # ni «saltar»
-    assert tp.reset_btn.toolTip() == "Terminar sesión"
-    assert tp.reset_btn._icon_name == "flag"
+    assert not tp.reset_btn.isVisibleTo(tp)             # ni «Reiniciar»: se termina con «Parar»
+    assert tp.stop_btn.toolTip().startswith("Parar: termina la sesión libre")
     assert ctrl.data_handler.load_settings()['timer_kind'] == 'free'
     # Persistido en el JSON: otra instancia arranca en Libre
     saved = json.loads((tmp_path / "data.json").read_text(encoding="utf-8"))
@@ -299,7 +300,7 @@ def test_selector_cambia_a_libre_y_lo_recuerda(ctrl, qtbot, tmp_path):
     assert not ctrl.model.is_free
     assert tp.mode_label.text() == "Enfoque"
     assert tp.cycle_dots.isVisibleTo(tp)
-    assert tp.reset_btn.toolTip() == "Reiniciar"
+    assert tp.reset_btn.isVisibleTo(tp) and tp.reset_btn.toolTip() == "Reiniciar"
     assert tp.time_label.text() == f"{POMODORO_MIN}:00"
     assert ctrl.data_handler.load_settings()['timer_kind'] == 'pomodoro'
 
@@ -335,7 +336,7 @@ def test_selector_bloqueado_con_sesion_a_medias(ctrl, clock):
     _work(ctrl, clock, 60)
     ctrl.toggle_timer()
     assert not tp.kind_buttons['pomodoro'].isEnabled()
-    ctrl.reset_timer()                                   # «Terminar sesión»
+    ctrl.reset_timer()                                   # en Libre termina, como «Parar»
     assert tp.kind_buttons['pomodoro'].isEnabled()
 
 
@@ -392,7 +393,7 @@ def test_terminar_sesion_da_xp_proporcional(ctrl, qtbot, clock, toasts):
     ctrl.toggle_timer()
     ctrl.toggle_timer()
     _work(ctrl, clock, 13 * 60)
-    ctrl.timer_panel.reset_btn.click()                   # «Terminar sesión»
+    ctrl.timer_panel.stop_btn.click()                    # «Parar»
     qtbot.wait(500)
     assert not ctrl.model.is_running
     assert ctrl.model.free_elapsed == 0
@@ -427,7 +428,7 @@ def test_mascota_no_habla_de_pomodoros_en_libre(ctrl, qtbot, clock, toasts):
     _go_free(ctrl)
     ctrl.toggle_timer()
     _work(ctrl, clock, 7 * 60)
-    ctrl.timer_panel.reset_btn.click()                   # «Terminar sesión»
+    ctrl.timer_panel.stop_btn.click()                    # «Parar»
     qtbot.wait(500)
     assert events == ['free_session']
 

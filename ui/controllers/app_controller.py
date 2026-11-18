@@ -91,6 +91,7 @@ class AppController(QObject):
         tp.toggle_requested.connect(self.toggle_timer)
         tp.reset_requested.connect(self.reset_timer)
         tp.skip_requested.connect(self.skip_break)
+        tp.stop_requested.connect(self.stop_session)
         tp.complete_task_requested.connect(self.toggle_active_task_completion)
         tp.panel_toggle_requested.connect(self.toggle_task_panel)
 
@@ -307,6 +308,7 @@ class AppController(QObject):
         self._update_timer_display()
         self._sync_compact()
         self._sync_music_focus()
+        self._sync_kind_selector()  # pausado a mitad: aparece «Parar»
         minutes = max(1, round(gap / 60))
         what = ("el descanso" if was_break
                 else "la sesión libre" if self.model.is_free else "el pomodoro")
@@ -387,8 +389,9 @@ class AppController(QObject):
 
     def reset_timer(self, keep_cycle: bool = False) -> None:
         if self.model.is_free:
-            # Modo Libre: el botón de reinicio es «Terminar sesión» (también al
-            # completar o borrar la tarea activa con la sesión a medias)
+            # Modo Libre: reiniciar es terminar la sesión, como «Parar»
+            # (llega aquí al completar o borrar la tarea activa con la sesión
+            # a medias)
             self.finish_free_session()
             return
         if self.model.is_running:
@@ -406,6 +409,56 @@ class AppController(QObject):
         self._sync_compact()
         self._sync_music_focus()
         self._sync_kind_selector()
+
+    # ---- «Parar» ----
+    def _work_in_progress(self) -> bool:
+        """Hay trabajo a medias que «Parar» puede terminar: en Libre, una
+        sesión corriendo o con tiempo; en el Pomodoro, uno empezado. Mide
+        contra _session_total y no contra pomodoro_duration: si a mitad se
+        acorta la duración en Ajustes, el pomodoro sigue empezado."""
+        m = self.model
+        if m.is_break_time:
+            return False
+        if m.is_free:
+            return m.is_running or m.free_elapsed > 0
+        return m.is_running or m.remaining_time < self._session_total
+
+    def _stop_visible(self) -> bool:
+        """«Parar» se ofrece en Libre con la sesión en marcha o en pausa, y en
+        el Pomodoro solo en pausa: corriendo, su fin natural es la cuenta
+        atrás, y pausar antes evita pararlo de un clic sin querer."""
+        return self._work_in_progress() and (self.model.is_free
+                                             or not self.model.is_running)
+
+    def stop_session(self) -> None:
+        """«Parar» (timer, mini ventana y bandeja): termina la sesión donde
+        está y el tiempo cuenta. En Libre es finish_free_session (tramo,
+        recompensas desde 5 min, Asana…). En el Pomodoro se registra el tramo
+        en curso con su fin real (las pausas ya registraron los suyos) y el
+        contador vuelve al inicio CONSERVANDO los puntos del ciclo, pero un
+        pomodoro a medias no se completa: sin XP ni monedas, sin punto del
+        ciclo, sin descanso, sin comentario en Asana, sin evento a n8n, sin
+        mascota y sin la pregunta de esfuerzo. Solo un aviso de lo que pasó.
+        En el descanso no hace nada (ahí está «Saltar descanso»)."""
+        if self.model.is_free:
+            self.finish_free_session()
+            return
+        if not self._work_in_progress():
+            return
+        worked = max(0.0, self._session_total - self.model.get_display_time())
+        was_running = self.model.is_running
+        self.reset_timer(keep_cycle=True)
+        if was_running:
+            sound_service.play("stop")  # como al pausar; en pausa ya sonó
+        if worked >= 1:
+            toast.show_info(self._feedback_window(),
+                            f"Pomodoro parado a los {self._clock_text(worked)}: el tiempo "
+                            "queda guardado. La XP y las monedas llegan al completarlo.",
+                            duration=3200)
+
+    def _sync_tray_stop(self) -> None:
+        """«Parar la sesión» de la bandeja: habilitado cuando se vería el botón."""
+        self._stop_action.setEnabled(self._stop_visible())
 
     def skip_break(self) -> None:
         if not self.model.is_break_time:
@@ -615,9 +668,12 @@ class AppController(QObject):
             self.data_handler.save_settings(settings)
 
     def _sync_kind_selector(self) -> None:
-        """Con una sesión a medias o en descanso el modo no se cambia."""
+        """Con una sesión a medias o en descanso el modo no se cambia. De
+        paso, «Parar» se ve solo con algo que parar (se llama en cada cambio
+        de estado del timer)."""
         self.timer_panel.set_kind_enabled(not self.model.is_break_time
                                           and not self.model.is_session_in_progress())
+        self.timer_panel.set_stoppable(self._stop_visible())
 
     def _split_free_at_midnight(self) -> None:
         """Modo Libre: una sesión que cruza la medianoche se parte en el
@@ -657,7 +713,7 @@ class AppController(QObject):
         self.asana.push_pending()
 
     def finish_free_session(self, silent: bool = False) -> None:
-        """«Terminar sesión» del modo Libre: registra el último tramo y deja
+        """«Parar» en el modo Libre: registra el último tramo y deja
         el contador a cero. Desde 5 min da 1 XP por minuto y 1 moneda cada
         5 min, suma a la racha, comenta en Asana y avisa con toast, sonido y
         mascota; con menos solo queda el tiempo registrado. Sin descansos ni
@@ -1414,6 +1470,13 @@ class AppController(QObject):
         menu.addAction(self._music_action)
         menu.aboutToShow.connect(self._sync_tray_music)
         self._sync_tray_music()
+        # «Parar la sesión», el mismo que el botón: habilitado solo cuando el
+        # botón se vería (se decide al abrir el menú)
+        self._stop_action = QAction("Parar la sesión", menu)
+        self._stop_action.triggered.connect(self.stop_session)
+        menu.addAction(self._stop_action)
+        menu.aboutToShow.connect(self._sync_tray_stop)
+        self._sync_tray_stop()
         menu.addSeparator()
         quit_action = QAction("Cerrar", menu)
         quit_action.triggered.connect(self.confirm_quit)  # pregunta, como la X
@@ -1638,6 +1701,7 @@ class AppController(QObject):
             self.compact_window = CompactWindow()
             self.compact_window.toggle_requested.connect(self.toggle_timer)
             self.compact_window.skip_requested.connect(self.skip_break)
+            self.compact_window.stop_requested.connect(self.stop_session)
             self.compact_window.expand_requested.connect(self.show_normal)
         self._save_window_geometry()
         geo = self.window.geometry()
@@ -1661,7 +1725,8 @@ class AppController(QObject):
         task = self._task_by_id(self.model.active_task_id)
         self.compact_window.set_state(self._clock_text(shown), self.model.is_running,
                                       task.get('name') if task else None,
-                                      self.model.is_break_time, free=self.model.is_free)
+                                      self.model.is_break_time, free=self.model.is_free,
+                                      stoppable=self._stop_visible())
         fraction = self._timer_fraction(shown)
         if fraction is not None:
             self.compact_window.set_progress(fraction, animate=self._ring_animates(shown))

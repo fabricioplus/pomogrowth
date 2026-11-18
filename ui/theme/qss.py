@@ -133,7 +133,7 @@ QToolButton {{
 QToolButton:hover {{ background: {t.surface_hover}; color: {t.fg}; }}
 QToolButton:pressed {{ background: {t.surface_active}; }}
 QToolButton[variant="close"]:hover {{ background: {t.danger}; color: {t.fg}; }}
-/* Botones redondos secundarios del timer (reiniciar, saltar) */
+/* Botones redondos secundarios del timer (reiniciar, saltar, parar) */
 QToolButton[variant="round"] {{
     background: {t.surface};
     border: 1px solid {t.border};
