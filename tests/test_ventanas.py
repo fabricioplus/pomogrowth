@@ -833,6 +833,58 @@ def test_solo_el_primer_paso_a_la_siguiente_de_una_racha(ctrl, monkeypatch):
                         "No se pudo reproducir ninguna pista de la lista"]
 
 
+@pytest.mark.parametrize("how", ["pausa", "parar", "siguiente", "dialogo"])
+def test_la_racha_se_cierra_al_pausar_o_al_elegir_otra(ctrl, monkeypatch, how):
+    """Tras un «paso a la siguiente» avisado, el usuario pausa, para, pulsa
+    «Siguiente» en el mini reproductor o elige otra lista en Música sin que
+    llegue a sonar nada: si vuelve a fallar es otra racha y se avisa. Antes
+    solo la cerraba volver a sonar, y con emisoras caídas podían pasar
+    minutos sin ningún aviso hasta el final."""
+    from services.music_service import MusicService
+    from ui.widgets import toast
+    seen = []
+    monkeypatch.setattr(toast, "show_warning",
+                        lambda win, msg, duration=0: seen.append(msg))
+    state = {'state': 'error', 'want': True}
+    monkeypatch.setattr(MusicService, "state", property(lambda s: state['state']))
+    monkeypatch.setattr(MusicService, "is_playing", property(lambda s: state['want']))
+    monkeypatch.setattr(MusicService, "next", lambda s, *a, **k: None)
+    emit = ctrl.music.error_occurred.emit
+    emit("No se pudo reproducir «Radio 1»: paso a la siguiente")      # avisado
+    emit("No se pudo reproducir «Radio 2»: paso a la siguiente")      # misma racha
+    ctrl.music.state_changed.emit('loading')       # el salto: la racha sigue
+    emit("No se pudo reproducir «Radio 3»: paso a la siguiente")
+    assert seen == ["No se pudo reproducir «Radio 1»: paso a la siguiente"]
+    if how == "pausa":
+        state.update(state='paused', want=False)
+        ctrl.music.state_changed.emit('paused')
+    elif how == "parar":
+        state.update(state='idle', want=False)
+        ctrl.music.state_changed.emit('idle')
+    elif how == "siguiente":
+        ctrl.timer_panel.mini_player.next_requested.emit()
+    else:
+        from ui.dialogs import music_dialog
+
+        class _Dialog:
+            def __init__(self, *a, **k):
+                pass
+
+            def exec(self):
+                return 0
+
+            def deleteLater(self):
+                pass
+        monkeypatch.setattr(music_dialog, "MusicDialog", _Dialog)
+        ctrl.open_music()
+    state.update(state='loading', want=True)       # otra vez, sin llegar a sonar
+    ctrl.music.state_changed.emit('loading')
+    state['state'] = 'error'
+    ctrl.music.state_changed.emit('error')
+    emit("No se pudo reproducir «Otra lista»: paso a la siguiente")   # racha nueva
+    assert seen[1:] == ["No se pudo reproducir «Otra lista»: paso a la siguiente"]
+
+
 def test_sin_ventana_a_la_vista_la_musica_avisa_en_la_bandeja(ctrl, qtbot, monkeypatch):
     from ui.widgets import toast
     toasts, notes = [], []
@@ -968,6 +1020,50 @@ def test_error_de_asana_durante_el_splash_espera_a_la_principal(ctrl, qtbot, mon
     assert shown == []
     qtbot.waitUntil(lambda: bool(shown), timeout=2000)
     assert shown == [(win, True)]
+
+
+def _visible_modals():
+    def title(w):
+        label = getattr(w, '_title_label', None)
+        return label.text() if label is not None else type(w).__name__
+    return sorted(title(w) for w in QApplication.topLevelWidgets()
+                  if w.isVisible() and w.isModal())
+
+
+def test_error_de_asana_en_el_splash_y_luego_la_bienvenida(ctrl, qtbot):
+    """Arranque con sync automática y Asana caída: el error sale al terminar
+    el splash y la bienvenida («¿Cómo te llamas?», la presentación o el plan
+    de hoy) espera a que se cierre. Antes salía encima del error, a los
+    400 ms, y había que cerrarlos en orden inverso."""
+    from ui.windows.splash import SplashWindow
+    ctrl.window.hide()
+    ctrl._splash = SplashWindow()                  # como launch() con auto-sync
+    ctrl._splash.show()
+    ctrl.asana.progress.connect(ctrl._splash.set_progress)
+    ctrl.asana.error.connect(lambda _msg: ctrl._end_splash(-1))
+    stacks = []
+
+    def close_one():
+        stacks.append(_visible_modals())
+        QApplication.activeModalWidget().reject()
+
+    def look():
+        if QApplication.activeModalWidget() is not None and len(stacks) < 6:
+            close_one()                            # los de la bienvenida, según salen
+    closer = QTimer()
+    closer.setInterval(150)
+    closer.timeout.connect(look)
+    QTimer.singleShot(1200, lambda: (close_one(), closer.start()))
+    ctrl.asana.error.emit("No se pudo conectar con Asana")
+    try:
+        qtbot.waitUntil(lambda: ctrl._welcome_shown and len(stacks) >= 2
+                        and QApplication.activeModalWidget() is None, timeout=15000)
+    finally:
+        closer.stop()
+    # A los 1,2 s, solo el error (la bienvenida ya tocaba a los 0,4 s)
+    assert stacks[0] == ["Asana"], stacks
+    # Después, uno detrás de otro: nunca dos a la vez
+    assert all(len(stack) == 1 and stack != ["Asana"] for stack in stacks[1:]), stacks
 
 
 def test_un_modal_con_la_principal_minimizada_la_restaura(ctrl, qtbot, monkeypatch):

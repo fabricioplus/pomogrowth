@@ -164,6 +164,9 @@ class AppController(QObject):
         window.title_bar.music_requested.connect(self.open_music)
         mini = tp.mini_player
         mini.toggle_requested.connect(self.music.toggle_pause)
+        # «Siguiente» a mano empieza una racha de fallos nueva (antes que el
+        # salto, por si falla en el acto)
+        mini.next_requested.connect(self._end_music_streak)
         mini.next_requested.connect(self.music.next)
         mini.open_requested.connect(self.open_music)
         self.music.now_playing_changed.connect(self._refresh_mini_player)
@@ -968,6 +971,8 @@ class AppController(QObject):
         finally:
             self._music_dialog = None
             dlg.deleteLater()
+            # Lo que falle a partir de ahora (quizá otra lista) se avisa de nuevo
+            self._end_music_streak()
 
     def _refresh_mini_player(self, *_args) -> None:
         self.timer_panel.mini_player.show_now_playing(self.music.current(),
@@ -979,12 +984,19 @@ class AppController(QObject):
 
     def _on_music_state(self, state: str) -> None:
         """Transiciones del reproductor, al log: con la app instalada es lo que
-        dirá qué hizo la radio al cortarse. Al volver a sonar se cierra la
-        racha de fallos seguidos."""
+        dirá qué hizo la radio al cortarse. Se cierra la racha de fallos
+        seguidos al volver a sonar y al pausar o parar (el usuario, o el
+        enfoque con «solo durante el enfoque»): lo que falle después es otra
+        racha y se avisa. Entre salto y salto el servicio pasa por 'loading',
+        que no la cierra."""
         logging.info("Música: %s → %s", self._music_state_seen, state)
         self._music_state_seen = state
-        if state == 'playing':
-            self._music_skip_warned = False
+        if state in ('playing', 'paused', 'idle'):
+            self._end_music_streak()
+
+    def _end_music_streak(self) -> None:
+        """El próximo «paso a la siguiente» vuelve a avisar."""
+        self._music_skip_warned = False
 
     def _on_music_service_error(self, message: str) -> None:
         """Errores de MusicService: al log (sin enlaces ni títulos) y al aviso.
@@ -1406,8 +1418,18 @@ class AppController(QObject):
         lines.append("Elige una tarea y arranca tu primer pomodoro.")
         return lines
 
+    # Con otro modal abierto, la bienvenida lo vuelve a mirar cada tanto (ms)
+    WELCOME_RETRY_MS = 300
+
     def _show_welcome(self) -> None:
         if self._welcome_shown or self._is_closing:
+            return
+        from PySide6.QtWidgets import QApplication
+        if QApplication.activeModalWidget() is not None:
+            # Otro modal abierto (p. ej. el error de Asana del arranque, que
+            # sale al terminar el splash): la bienvenida espera a que se
+            # cierre, uno detrás de otro y no apilados encima del error
+            QTimer.singleShot(self.WELCOME_RETRY_MS, self, self._show_welcome)
             return
         self._welcome_shown = True
         self._ask_user_name_if_needed()  # antes del plan o la bienvenida
