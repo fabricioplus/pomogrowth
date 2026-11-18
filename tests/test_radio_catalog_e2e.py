@@ -7,8 +7,8 @@ nadie pulsa reproducir, su registro tiene que seguir vacío. El catálogo se
 sustituye por uno que apunta a ese servidor (el real nunca se toca) y el
 audio va silenciado.
 
-No se comprueba el título de la canción: cómo llega (IcyMonitor o el proxy
-del búfer) no es cosa de la siembra.
+No se comprueba el título de la canción: cómo llega (el proxy de radios, en
+la misma conexión) no es cosa de la siembra.
 """
 import os
 import sys
@@ -87,7 +87,7 @@ def test_sembrar_no_conecta_y_reproducir_toca_la_primera(qtbot, tmp_path, emisor
     lofi = tmp_path / "lofi"          # Carpeta lofi vacía: play() va a las de serie
     lofi.mkdir()
     dh = DataHandler(tmp_path / "data.json")          # usuario nuevo
-    svc = MusicService(None, data_handler=dh, lofi_dir=lofi, icy_poll_ms=1000,
+    svc = MusicService(None, data_handler=dh, lofi_dir=lofi,
                        reconnect_delays=(200, 400), buffer_steps=(1, 2))
     svc.set_muted(True)
     try:
@@ -114,6 +114,75 @@ def test_sembrar_no_conecta_y_reproducir_toca_la_primera(qtbot, tmp_path, emisor
         workers.wait_threads(15)
         qtbot.wait(50)
         svc.deleteLater()
+
+
+def _servicio_con(tmp_path, monkeypatch, catalog):
+    from services.music_service import MusicService
+    monkeypatch.setattr(DataHandler, "SEED_DEFAULT_RADIOS", True)
+    monkeypatch.setattr(rc, "DEFAULT_RADIOS", catalog)
+    lofi = tmp_path / "lofi"
+    lofi.mkdir()
+    dh = DataHandler(tmp_path / "data.json")
+    svc = MusicService(None, data_handler=dh, lofi_dir=lofi,
+                       reconnect_delays=(100, 100), buffer_steps=(1, 2))
+    svc.set_muted(True)
+    return svc
+
+
+def _cerrar(svc, qtbot):
+    svc.shutdown()
+    QThreadPool.globalInstance().waitForDone(15000)
+    workers.wait_threads(15)
+    qtbot.wait(50)
+    svc.deleteLater()
+
+
+def test_una_radio_de_serie_caida_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
+                                                     monkeypatch):
+    """live=True desde la siembra: si la primera no responde (URL caducada,
+    404), no se reintenta un minuto esa misma: se avisa y suena la siguiente.
+    Un directo que ya sonó y se corta sigue reconectando (test_music_service)."""
+    catalog = (rc.DefaultRadio('caida', "Caída", f"{emisora.base}/caducada",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('viva', "Viva", f"{emisora.base}/live?r=viva",
+                               'audio/mpeg', 128))
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    errors, states = [], []
+    svc.error_occurred.connect(errors.append)
+    svc.state_changed.connect(states.append)
+    try:
+        svc.play()
+        assert svc.current()['title'] == "Caída" and svc.current()['live'] is True
+        qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+        assert svc.current()['title'] == "Viva"
+        assert errors == ["No se pudo reproducir «Caída»: paso a la siguiente"]
+        assert 'reconnecting' not in states
+        assert [p for p, _ua in _requests(emisora)].count("/caducada") == 1
+        # La caída sigue guardada como directo: no se rebaja a pista
+        assert svc.items(rc.SEED_LIST_ID)[0]['live'] is True
+    finally:
+        _cerrar(svc, qtbot)
+
+
+def test_una_radio_sola_en_su_lista_se_reintenta(qtbot, tmp_path, emisora,
+                                                monkeypatch):
+    """Sin otra a la que pasar, reintentar es lo único útil: la escalera de
+    reconexión de siempre y, al acabarla, «Se perdió la conexión…»."""
+    catalog = (rc.DefaultRadio('caida', "Caída", f"{emisora.base}/caducada",
+                               'audio/mpeg', 128),)
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    errors, states = [], []
+    svc.error_occurred.connect(errors.append)
+    svc.state_changed.connect(states.append)
+    try:
+        svc.play()
+        qtbot.waitUntil(lambda: svc.state == 'error', timeout=WAIT)
+        assert 'reconnecting' in states
+        assert errors == ["Se perdió la conexión con la emisora y no se pudo recuperar"]
+        assert not svc.is_playing
+        assert [p for p, _ua in _requests(emisora)].count("/caducada") == 3   # 1 + 2 reintentos
+    finally:
+        _cerrar(svc, qtbot)
 
 
 @pytest.fixture

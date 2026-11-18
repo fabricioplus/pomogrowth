@@ -22,7 +22,9 @@ Contrato con la interfaz (resumen; detalle en cada método):
   controller avise con on_focus_state(True).
 - Directo: si se corta (error, fin o sin avanzar STALL_MS) reconecta con las
   esperas de RECONNECT_DELAYS_MS (inyectables) sin saltar de item; los
-  intentos solo vuelven a cero tras STABLE_MS (60 s) sonando. Pista finita:
+  intentos solo vuelven a cero tras STABLE_MS (60 s) sonando. Un directo
+  que falla sin haber sonado desde que se eligió, en una lista con más, se
+  salta como una pista (una radio caída no tapa a las demás). Pista finita:
   al terminar pasa a la siguiente según repeat/shuffle y, si falla, salta
   tras ERROR_SKIP_MS sin bucle infinito si fallan todas.
 - Una sola conexión con la emisora (services.stream_buffer): las radios de
@@ -903,9 +905,9 @@ class MusicService(QObject):
             return self._live_runtime
         return item.get('live') is True
 
-    def _treat_as_live(self) -> bool:
-        """¿Un corte de este item se arregla reconectando? Un item de vida
-        desconocida que nunca llegó a sonar se trata como pista (se salta)."""
+    def _seems_live(self) -> bool:
+        """¿Es un directo, por lo que se sabe ahora? Un item de vida
+        desconocida que nunca llegó a sonar no lo es."""
         item = self._current_item()
         if item is None or item['kind'] != 'url':
             return False
@@ -914,6 +916,17 @@ class MusicService(QObject):
         if item.get('live') is not None:
             return bool(item['live'])
         return self._played and self._player.duration() <= 0
+
+    def _treat_as_live(self) -> bool:
+        """¿Un corte de este item se arregla reconectando? Sí en un directo,
+        salvo uno guardado como directo que aún no sonó desde que se eligió
+        en una lista con más: una radio caída (URL caducada, emisora apagada)
+        pasa a la siguiente, como una pista, en vez de reintentarse un
+        minuto. Sola en su lista, reintentar es lo único útil."""
+        if not self._seems_live():
+            return False
+        return (self._played or self._live_runtime is not None
+                or len(self._items_of(self._cur_list)) <= 1)
 
     def _stop_timers(self) -> None:
         for timer in (self._reconnect_timer, self._skip_timer, self._stable_timer,
@@ -1316,7 +1329,7 @@ class MusicService(QObject):
         """¿Lleva precarga al reconectar? Solo un directo confirmado: durar 0
         no basta (una pista servida sin Content-Length también lo da) y el
         proxy la repetiría al empalmar."""
-        return (self._proxy_eligible(item) and self._treat_as_live()
+        return (self._proxy_eligible(item) and self._seems_live()
                 and self._live_confirmed())
 
     def _connection_budget(self) -> ConnectionBudget:
