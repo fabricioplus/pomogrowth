@@ -1,4 +1,4 @@
-"""MusicService, resolver de enlaces y monitor ICY contra un servidor local.
+"""MusicService, resolver de enlaces y proxy local contra un servidor local.
 
 Todo sale solo a 127.0.0.1 (un servidor HTTP en un hilo) y el audio va
 silenciado: los MP3 son tramas MPEG-1 Layer III a 320 kbps rellenas de
@@ -28,7 +28,7 @@ from PySide6.QtMultimedia import QMediaMetaData  # noqa: E402
 from core.data_handler import DataHandler  # noqa: E402
 from core.music_library import Entry  # noqa: E402
 from services import music_resolver, stream_buffer as stream_buffer_mod, workers  # noqa: E402
-from services.icy_monitor import IcyMonitor, parse_stream_title, read_icy_info  # noqa: E402
+from services.icy import parse_stream_title  # noqa: E402
 from services.music_resolver import ResolveResult, resolve_link  # noqa: E402
 from services.music_service import MusicService, _safe_meta  # noqa: E402
 from services.stream_buffer import StreamBuffer  # noqa: E402
@@ -248,7 +248,6 @@ def make_service(qtbot, tmp_path):
         lofi = tmp_path / "lofi"
         lofi.mkdir(exist_ok=True)
         kwargs.setdefault("reconnect_delays", (200, 400, 600, 800, 1000))
-        kwargs.setdefault("icy_poll_ms", 400)
         kwargs.setdefault("buffer_steps", (1, 2))     # precargas cortas: tests rápidos
         svc = MusicService(None, data_handler=dh, lofi_dir=lofi, **kwargs)
         svc.set_muted(True)
@@ -351,34 +350,12 @@ def test_resolve_header_utf8():
 
 
 # ------------------------------------------------------------------ ICY
-def test_read_icy_info(server):
-    info = read_icy_info(f"{server.base}/live")
-    assert info == {'title': "Artista 1 - Tema 1", 'name': "Radio de prueba", 'bitrate': 320,
-                    'mime': "audio/mpeg"}
-    # Sin metadatos (archivo normal) o sin servidor: None, nunca excepción
-    assert read_icy_info(f"{server.base}/song.mp3")['title'] is None
-    assert read_icy_info(f"http://127.0.0.1:{_free_port()}/x", timeout=2) == {
-        'title': None, 'name': None, 'bitrate': None, 'mime': None}
-
-
 def test_parse_stream_title_robusto():
     assert parse_stream_title(b"StreamTitle='Guns N' Roses - Patience';StreamUrl='';\0\0") \
         == "Guns N' Roses - Patience"
     assert parse_stream_title(b"StreamTitle='';\0") is None
     assert parse_stream_title(b"\xff\xfe basura") is None
     assert parse_stream_title("StreamTitle='Canción';".encode("utf-8")) == "Canción"
-
-
-def test_icy_monitor_emite_cambios(qtbot, server):
-    mon = IcyMonitor(poll_ms=300)
-    seen = []
-    mon.info_changed.connect(seen.append)
-    mon.start(f"{server.base}/live")
-    qtbot.waitUntil(lambda: len(seen) >= 1, timeout=WAIT)
-    mon.stop()
-    workers.wait_threads(10)
-    assert seen[0]['title'] == "Artista 1 - Tema 1"
-    assert not mon.active
 
 
 # ------------------------------------------------------------------ reproducción
@@ -711,17 +688,13 @@ def drip():
     srv.close()
 
 
-def test_resolver_y_icy_cumplen_su_plazo_total_aunque_el_servidor_gotee(drip):
+def test_el_resolver_cumple_su_plazo_total_aunque_el_servidor_gotee(drip):
     t0 = time.monotonic()
     res = resolve_link(f"{drip.base}/hdr", timeout=1.5)      # plazo total: 3 s
     assert res.error and time.monotonic() - t0 < 6
     t0 = time.monotonic()
     res = resolve_link(f"{drip.base}/body.m3u", timeout=1.5)
     assert res.error and time.monotonic() - t0 < 6
-    t0 = time.monotonic()
-    info = read_icy_info(f"{drip.base}/icy", timeout=1.5)
-    assert info['name'] == "Goteo" and info['title'] is None
-    assert time.monotonic() - t0 < 4.5
 
 
 def test_un_plazo_cortado_desde_otro_hilo(drip):
@@ -758,7 +731,10 @@ def test_cerrar_con_un_enlace_en_curso_no_retiene_el_proceso(tmp_path, drip):
         svc = MusicService(None, lofi_dir={str(tmp_path / 'lofi')!r})
         svc.set_muted(True)
         svc.add_link({drip.base + '/hdr'!r})
-        svc._icy.start({drip.base + '/icy'!r})
+        # Una radio que gotea leyéndose por el proxy local (su lector, en un hilo)
+        import requests, threading
+        url = svc._stream_buffer.open({drip.base + '/icy'!r}, 0)
+        threading.Thread(target=lambda: requests.get(url, timeout=30), daemon=True).start()
         QTimer.singleShot(400, lambda: (svc.shutdown(), app.quit()))
         app.exec()
         print("FIN", flush=True)
@@ -830,15 +806,18 @@ def test_mp3_sin_content_length_es_una_pista_y_pasa_a_la_siguiente(qtbot, server
 
 def test_pista_sin_content_length_que_se_corta_no_va_por_el_bufer(qtbot, server, make_service):
     """Durar 0 no confirma un directo: la pista servida por partes que se
-    corta una vez reconecta directa (no por el búfer, que la empalmaría sin
-    fin) y, al acabar, pasa a la siguiente."""
+    corta una vez reconecta sin precarga (con búfer, el proxy la empalmaría)
+    y, al acabar, pasa a la siguiente. Ahora toda conexión de un enlace que
+    puede ser un directo pasa por el proxy: se comprueba que ninguna lleve
+    precarga ni se dé por directo confirmado."""
     svc = make_service()
     lid, (a, b) = _list_with(svc, Entry(f"{server.base}/chunked1.mp3"),
                              Entry(f"{server.base}/chunked2.mp3"))
     svc.set_repeat('off')
     opened = []
     real_open = svc._stream_buffer.open
-    svc._stream_buffer.open = lambda *args: opened.append(args) or real_open(*args)
+    svc._stream_buffer.open = lambda *args, **kw: opened.append((args, kw)) or real_open(*args,
+                                                                                         **kw)
     states = []
     svc.state_changed.connect(states.append)
     svc.play(lid)
@@ -847,20 +826,25 @@ def test_pista_sin_content_length_que_se_corta_no_va_por_el_bufer(qtbot, server,
     svc._handle_failure("La reproducción se quedó atascada")
     qtbot.waitUntil(lambda: 'reconnecting' in states, timeout=WAIT)
     qtbot.waitUntil(lambda: svc.current()['item_id'] == b, timeout=WAIT)
-    assert opened == [] and svc._buffer_level == 0
+    assert len(opened) >= 2 and svc._buffer_level == 0
+    assert all(args[1] == 0 and kw['known_live'] is False for args, kw in opened)
     assert svc.items(lid)[0]['live'] is False   # se aprende: era una pista
 
 
 def test_bufer_no_repite_sin_fin_un_archivo_que_se_acaba(qtbot, server, stream_buffer):
     """Un origen que da audio y cierra limpio enseguida una y otra vez es un
-    archivo: tras unos pocos empalmes se vacía y el reproductor recibe el fin."""
+    archivo: tras unos pocos empalmes se vacía y el reproductor recibe el fin.
+    (Antes lo cortaba MAX_QUICK_ENDS; ahora, el tope general del lector: cada
+    conexión sin STABLE_AUDIO_S de audio cuenta como un reintento.)"""
     track = len(FRAME) * 115
     url = stream_buffer.open(f"{server.base}/chunked1.mp3", 0.5)
     sock, status, _headers, body, _waited = _proxy_get(url)
     with sock:
         assert status == 200
-        data, closed = _read_for(sock, 8)
-        assert closed and track <= len(body + data) <= stream_buffer_mod.MAX_QUICK_ENDS * track
+        data, closed = _read_for(sock, 12)
+        audio, _final = _dechunk(body + data)
+        tries = 1 + len(stream_buffer.RETRY_DELAYS_S)
+        assert closed and track <= len(audio) <= tries * track
 
 
 def test_pausa_de_un_enlace_desconecta_y_sigue_donde_iba(qtbot, server, make_service):
@@ -965,11 +949,11 @@ def test_lista_llena_por_texto_avisa(make_service):
     assert added == 0 and error == "La lista está llena: crea otra para añadir más"
 
 
-# ------------------------------------------------------------------ búfer adaptativo
+# ------------------------------------------------------------------ proxy local y búfer adaptativo
 def _proxy_get(url: str, ua: str = "Lavf/61.7.100", timeout: float = 15):
     """GET al proxy como lo hace FFmpeg (pide metadatos ICY) → (socket,
     estado, cabeceras en minúsculas, lo que ya llegó del cuerpo, segundos
-    hasta la primera respuesta)."""
+    hasta la primera respuesta). El cuerpo llega por partes: _dechunk."""
     parts = urlsplit(url)
     sock = socket.create_connection((parts.hostname, parts.port), timeout=timeout)
     t0 = time.monotonic()
@@ -1008,9 +992,27 @@ def _read_for(sock, seconds: float):
     return data, False
 
 
+def _dechunk(raw: bytes):
+    """Cuerpo por partes → (los datos de las partes completas, ¿llegó la
+    parte final vacía?: el fin limpio del audio, no un corte)."""
+    out, pos = bytearray(), 0
+    while True:
+        end = raw.find(b"\r\n", pos)
+        if end < 0:
+            return bytes(out), False
+        size = int(raw[pos:end].split(b";")[0], 16)
+        if size == 0:
+            return bytes(out), True
+        if end + 2 + size > len(raw):
+            return bytes(out), False
+        out += raw[end + 2:end + 2 + size]
+        pos = end + 2 + size + 2
+
+
 @pytest.fixture
 def stream_buffer(qtbot):
     buf = StreamBuffer()
+    buf.RETRY_DELAYS_S = (0.3, 0.3, 0.3)     # esperas cortas: tests rápidos
     yield buf
     buf.shutdown()
 
@@ -1023,9 +1025,11 @@ def test_bufer_precarga_por_tiempo_y_sin_metadatos(qtbot, server, stream_buffer)
         # Nada (ni las cabeceras) hasta tener 1 s de audio, y luego de golpe
         assert status == 200 and waited >= 1.0
         assert headers['content-type'] == "audio/mpeg" and headers['icy-name'] == "Radio de prueba"
-        assert 'icy-metaint' not in headers                   # el origen, sin Icy-MetaData
+        # El proxy pide los metadatos (los títulos salen de su conexión) y
+        # los quita del audio: al reproductor no le dice que haya
+        assert 'icy-metaint' not in headers
         more, closed = _read_for(sock, 0.4)
-        data = body + more
+        data, _final = _dechunk(body + more)
         assert not closed and len(data) >= 25000
         assert data.startswith(FRAME[:4]) and b"StreamTitle" not in data
     # Solo la ruta con el token de la sesión en curso
@@ -1039,8 +1043,6 @@ def test_bufer_precarga_por_tiempo_y_sin_metadatos(qtbot, server, stream_buffer)
 def test_bufer_reconecta_el_origen_sin_cortar_al_reproductor(qtbot, server, stream_buffer):
     with server.lock:
         server.drop_count = 0
-    seen = []
-    stream_buffer.underrun.connect(seen.append)
     url = stream_buffer.open(f"{server.base}/drop", 1.0)
     sock, status, _headers, _body, _waited = _proxy_get(url)   # User-Agent de FFmpeg
     with sock:
@@ -1049,21 +1051,29 @@ def test_bufer_reconecta_el_origen_sin_cortar_al_reproductor(qtbot, server, stre
         assert not closed and len(data) > 100000
     with server.lock:
         assert server.drop_count >= 2             # reconectó con el User-Agent del reproductor
-    assert seen == []
 
 
-def test_bufer_vacio_cierra_al_reproductor(qtbot, server, stream_buffer):
-    seen = []
-    stream_buffer.underrun.connect(seen.append)
+def test_bufer_aguanta_un_silencio_corto_y_cierra_si_el_origen_no_vuelve(qtbot, server,
+                                                                          stream_buffer):
+    """Un silencio más corto que DEAD_AIR_S no corta (antes, con 0,5 s de
+    búfer, el proxy cerraba al reproductor a los 0,5 s y reconectaba). Si el
+    origen no vuelve y el lector agota sus reintentos, se cierra."""
+    stream_buffer.DEAD_AIR_S = 5.0
     url = stream_buffer.open(f"{server.base}/silence", 0.5)
-    sid = stream_buffer.session_id
+    sock, status, _headers, body, _waited = _proxy_get(url)
+    with sock:
+        assert status == 200
+        # 1,5 s de audio, 3 s callado (sin cerrar) y sigue: misma conexión
+        data, closed = _read_for(sock, 6.5)
+        assert not closed and len(_dechunk(body + data)[0]) > 40000 * 3
+    stream_buffer.DEAD_AIR_S = 1.0
+    stream_buffer.RETRY_DELAYS_S = ()
+    url = stream_buffer.open(f"{server.base}/silence", 0.5)
     sock, status, _headers, _body, _waited = _proxy_get(url)
     with sock:
         assert status == 200
-        # 1,5 s de audio y 3 s callado: con 0,5 s de búfer se vacía y se cierra
-        _data, closed = _read_for(sock, 8)
+        _data, closed = _read_for(sock, 6)
         assert closed
-    qtbot.waitUntil(lambda: seen == [sid], timeout=WAIT)
 
 
 def test_bufer_no_empalma_ogg(qtbot, server, stream_buffer):
@@ -1076,7 +1086,7 @@ def test_bufer_no_empalma_ogg(qtbot, server, stream_buffer):
     with sock:
         assert status == 200 and headers['content-type'] == "audio/ogg"
         data, closed = _read_for(sock, 6)
-        assert closed and len(body + data) > 40000      # ~1,5 s servidos enteros
+        assert closed and len(_dechunk(body + data)[0]) > 40000   # ~1,5 s servidos enteros
     with server.lock:
         assert server.ogg_count == 1
 
@@ -1090,24 +1100,31 @@ def test_bufer_redirige_lo_que_no_es_audio(qtbot, server, stream_buffer):
     qtbot.waitUntil(lambda: seen == [stream_buffer.session_id], timeout=WAIT)
 
 
-def test_bypass_por_la_gracia_no_abre_otra_conexion(qtbot, server, stream_buffer, monkeypatch):
-    """La precarga vence sin datos mientras el lector espera para reconectar:
-    se despierta y sale (no abre otra conexión al origen) y avisa enseguida."""
-    monkeypatch.setattr(stream_buffer_mod, 'PREFILL_GRACE_S', 2.0)
+def test_una_primera_conexion_sin_audio_contesta_502_sin_abrir_otra(qtbot, server, stream_buffer,
+                                                                     monkeypatch):
+    """La 1.ª conexión no da audio (vacía, o nada en el plazo de la precarga):
+    502 y ni una conexión más. Antes reintentaba y acababa en un 302, con el
+    que FFmpeg repetía la petición: dos conexiones por intento."""
+    monkeypatch.setattr(stream_buffer_mod, 'PREFILL_GRACE_S', 1.0)
     with server.lock:
         server.mute_count = server.mute_hung = 0
-    seen = []
-    stream_buffer.bypassed.connect(seen.append)
-    # Conexiones vacías a los 0, 0,5 y 1,5 s; la gracia vence a los 2,5 s,
-    # en mitad de la espera de 2 s antes de la 4.ª
-    url = stream_buffer.open(f"{server.base}/mute", 0.5)
+    bypassed = []
+    stream_buffer.bypassed.connect(bypassed.append)
+    url = stream_buffer.open(f"{server.base}/mute", 0.5)     # 200 sin un byte de audio
     sid = stream_buffer.session_id
     resp = requests.get(url, allow_redirects=False, timeout=WAIT / 1000)
-    assert resp.status_code == 302 and resp.headers['Location'] == f"{server.base}/mute"
-    qtbot.waitUntil(lambda: seen == [sid], timeout=WAIT)
-    qtbot.wait(300)
+    assert resp.status_code == 502 and 'Location' not in resp.headers
+    assert stream_buffer.last_failure == (sid, 'network')
     with server.lock:
-        assert server.mute_count == 3 and server.mute_hung == 0
+        server.mute_count = 3                                # la siguiente se queda callada
+    url = stream_buffer.open(f"{server.base}/mute", 0.5)
+    t0 = time.monotonic()
+    resp = requests.get(url, allow_redirects=False, timeout=WAIT / 1000)
+    assert resp.status_code == 502 and time.monotonic() - t0 < 4
+    qtbot.wait(800)
+    with server.lock:
+        assert server.mute_count == 4 and server.mute_hung == 1
+    assert bypassed == []
 
 
 def test_tras_el_bypass_la_conexion_directa_tiene_su_plazo_entero(qtbot, make_service):
@@ -1120,12 +1137,16 @@ def test_tras_el_bypass_la_conexion_directa_tiene_su_plazo_entero(qtbot, make_se
     svc._load_started = svc._last_progress = time.monotonic() - 25
     before = time.monotonic()
     svc._on_buffer_bypassed(svc._stream_buffer.session_id)
-    assert svc._buffer_s == 0 and svc.state == 'reconnecting'
+    assert svc._buffer_s == 0 and svc.state == 'reconnecting' and not svc._proxied
     assert svc._load_started >= before and svc._last_progress >= before
     svc._stream_buffer.close()
 
 
-def test_tras_un_corte_reconecta_con_bufer_y_la_primera_es_directa(qtbot, server, make_service):
+def test_la_primera_va_por_el_proxy_sin_precarga_y_tras_un_corte_con_bufer(qtbot, server,
+                                                                          make_service):
+    """Antes la 1.ª conexión iba directa; ahora va por el proxy (una sola
+    conexión con la emisora y los títulos en ella) pero SIN precarga: la misma
+    carga rápida. Un corte sube el escalón y la reconexión lleva precarga."""
     with server.lock:
         server.drop_count = 0
     svc = make_service(buffer_steps=(0.5, 1))
@@ -1135,8 +1156,9 @@ def test_tras_un_corte_reconecta_con_bufer_y_la_primera_es_directa(qtbot, server
     svc.state_changed.connect(states.append)
     svc.play(lid, iid)
     qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
-    # La carga inicial no cambia: conexión directa y sin búfer
-    assert svc._player.source().toString() == source and svc.current()['buffer_s'] == 0
+    loaded = svc._player.source()
+    assert loaded.host() == "127.0.0.1" and loaded.port() == svc._stream_buffer.port
+    assert svc.current()['buffer_s'] == 0 and states[0] == 'loading'
     qtbot.waitUntil(lambda: 'reconnecting' in states, timeout=WAIT)
     qtbot.waitUntil(lambda: 'playing' in states[states.index('reconnecting'):], timeout=WAIT)
     after = states[states.index('reconnecting'):]
@@ -1147,28 +1169,34 @@ def test_tras_un_corte_reconecta_con_bufer_y_la_primera_es_directa(qtbot, server
     assert svc.current()['buffer_s'] == 0.5 and svc._buffer_level == 1
     with server.lock:
         assert server.drop_count >= 2
-    # Pausar y reanudar a mano: directo (rápido), pero se guarda el escalón
+    # Pausar y reanudar a mano: sin precarga (rápido), pero se guarda el escalón
     svc.pause()
     assert svc.current()['buffer_s'] == 0
     svc.resume()
     qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
-    assert svc._player.source().toString() == source and svc.current()['buffer_s'] == 0
-    assert svc._buffer_level == 1
+    assert svc._player.source().port() == svc._stream_buffer.port
+    assert svc.current()['buffer_s'] == 0 and svc._buffer_level == 1
     # Otra emisora: vuelve a 0
     lid2, [other] = _list_with(svc, Entry(f"{server.base}/live", live=True), name="Otra")
     svc.play(lid2, other)
-    assert svc._buffer_level == 0 and svc._player.source().toString() == f"{server.base}/live"
+    assert svc._buffer_level == 0 and svc.current()['buffer_s'] == 0
+    assert svc._player.source().port() == svc._stream_buffer.port
 
 
-def test_si_el_bufer_se_vacia_sube_un_escalon(qtbot, server, make_service):
+def test_si_el_lector_se_rinde_sube_un_escalon(qtbot, server, make_service):
+    """Cada sesión que acaba en un corte sube un escalón. Un silencio ya no
+    vacía el búfer y corta él solo: es el lector que da la conexión por muerta
+    (DEAD_AIR_S) y se rinde (aquí sin reintentos) el que acaba la sesión."""
     with server.lock:
         server.hiccup_count = 0
     svc = make_service(buffer_steps=(0.5, 1))
+    svc._stream_buffer.DEAD_AIR_S = 1.0
+    svc._stream_buffer.RETRY_DELAYS_S = ()
     lid, [iid] = _list_with(svc, Entry(f"{server.base}/hiccup", title="Radio", live=True))
     levels = []
     svc.state_changed.connect(lambda _s: levels.append(svc._buffer_level))
     svc.play(lid, iid)
-    # Corte → 0,5 s; el origen calla 3 s → el búfer se vacía → 1 s (tope)
+    # Corte → 0,5 s; el origen calla 3 s → conexión muerta → 1 s (tope)
     qtbot.waitUntil(lambda: svc._buffer_level == 2 and svc.state == 'playing',
                     timeout=WAIT * 2)
     assert 1 in levels and svc.current()['buffer_s'] == 1
@@ -1186,23 +1214,31 @@ def test_el_bufer_solo_para_directos_por_enlace(qtbot, make_service, tmp_path):
     for iid, expected in ((radio, True), (hls, False), (track, False), (loc, False)):
         svc._select(lid, iid)
         assert svc._buffer_eligible(svc._current_item()) is expected
+        # HLS, una pista conocida o un archivo local: directos, sin proxy
+        assert svc._proxy_eligible(svc._current_item()) is expected
     svc._select(lid, radio)
     item = svc._current_item()
     default = svc._player.playbackOptions().networkTimeout()
     svc._buffer_level = 1
-    assert svc._buffered_url(item, reconnect=False) is None      # reanudar: directo
+    url = svc._buffered_url(item, reconnect=False)               # reanudar: sin precarga
+    assert url.port() == svc._stream_buffer.port and svc.current()['buffer_s'] == 0
     url = svc._buffered_url(item, reconnect=True)
     assert url.port() == svc._stream_buffer.port and svc.current()['buffer_s'] == 1
     # FFmpeg espera a la precarga sin dar la conexión por muerta
     assert svc._player.playbackOptions().networkTimeout() > default + 1000
-    # Falla por el búfer sin llegar a sonar: el siguiente intento va directo
+    # Falla por el proxy sin llegar a sonar por un error de la emisora: el
+    # siguiente intento sigue por el proxy (ir directo diría lo mismo)
+    svc._stream_buffer.last_failure = (svc._proxy_sid, 'http')
+    svc._bump_buffer()
+    assert svc._buffered_url(item, reconnect=True) is not None
+    # Por un fallo de red: el siguiente va directo, por si el proxy es el problema
+    svc._stream_buffer.last_failure = (svc._proxy_sid, 'network')
     svc._bump_buffer()
     assert svc._buffer_level == 1 and svc._buffered_url(item, reconnect=True) is None
     assert svc._buffered_url(item, reconnect=True) is not None
     svc._unload()
     assert svc.current()['buffer_s'] == 0 and svc._stream_buffer.session_id == 0
     # Si el proxy no puede abrir, se conecta directo
-    svc._stream_buffer.open = lambda *_a: None
+    svc._stream_buffer.open = lambda *_a, **_kw: None
     assert svc._buffered_url(item, reconnect=True) is None and svc._buffer_s == 0
     assert svc._player.playbackOptions().networkTimeout() == default
-

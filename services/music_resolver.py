@@ -300,7 +300,7 @@ def _network_error(exc: Exception) -> str:
     return "No se pudo conectar con el servidor: revisa el enlace y tu conexión"
 
 
-def _is_icy_status_line(exc: Exception) -> bool:
+def is_icy_status_line(exc: Exception) -> bool:
     """Los SHOUTcast v1 contestan «ICY 200 OK», que http.client rechaza
     (BadStatusLine). FFmpeg sí lo entiende: es una radio en directo."""
     seen, cur = set(), exc
@@ -390,7 +390,7 @@ def _resolve_url(url: str, timeout: float,
                     mime=mime, bitrate=parse_bitrate(icy.get('icy-br')))])
             return ResolveResult(error=MSG_NOT_AUDIO)
     except Exception as exc:  # noqa: BLE001 - cualquier fallo de red → mensaje
-        if _is_icy_status_line(exc):
+        if is_icy_status_line(exc):
             return ResolveResult(entries=[Entry(source=url, title=title_from_source(url),
                                                 live=True)])
         host = urlsplit(url).hostname or '?'
