@@ -21,16 +21,39 @@ Contrato con la interfaz (resumen; detalle en cada método):
   música pero NO suena (state 'paused', waiting_focus True) hasta que el
   controller avise con on_focus_state(True).
 - Directo: si se corta (error, fin o sin avanzar STALL_MS) reconecta con las
-  esperas de RECONNECT_DELAYS_MS (inyectables) sin saltar de item; pista
-  finita: al terminar pasa a la siguiente según repeat/shuffle y, si falla,
-  salta tras ERROR_SKIP_MS sin bucle infinito si fallan todas.
-- Búfer adaptativo (services.stream_buffer): la primera conexión de cada
-  directo es siempre directa (carga rápida). Cada corte de un directo que ya
-  sonaba sube un escalón de BUFFER_STEPS_S y la reconexión pasa por el proxy
-  local con esa precarga ('buffering' mientras tanto; current()['buffer_s']
-  dice los segundos, 0 si va directo). Cambiar de item lo vuelve a 0; pausar
-  y reanudar reconecta directo pero conserva el escalón. Sin HLS ni archivos
-  locales ni pistas finitas, y sin guardarlo entre sesiones.
+  esperas de RECONNECT_DELAYS_MS (inyectables) sin saltar de item; los
+  intentos solo vuelven a cero tras STABLE_MS (60 s) sonando. Pista finita:
+  al terminar pasa a la siguiente según repeat/shuffle y, si falla, salta
+  tras ERROR_SKIP_MS sin bucle infinito si fallan todas.
+- Una sola conexión con la emisora (services.stream_buffer): las radios de
+  pago (DI.FM…) pausan la cuenta si ven dos. Todo enlace http(s) que no sea
+  HLS ni una pista ya conocida (live False) suena a través del proxy local
+  desde la primera conexión, con precarga 0 (la latencia de ir directo), y
+  el proxy es lo único que habla con la emisora: los títulos ICY, el nombre,
+  los kbps y el tipo llegan por su señal metadata, de esa misma conexión.
+  Con un item de vida desconocida (live None, como las entradas de un .pls)
+  deciden sus cabeceras: una pista (Content-Length o Accept-Ranges sin
+  icy-*) va directa por 302 y se guarda live False. Si el proxy no puede
+  abrir, o el intento anterior por él falló por la red sin llegar a sonar,
+  se conecta directo; si no puede validar el certificado de una emisora
+  https (un antivirus que inspecciona HTTPS…) o falla el proxy del sistema,
+  redirige y el reproductor conecta directo en ese mismo intento (sin
+  títulos). Un corte que el proxy le pasa al reproductor llega como error,
+  no como fin: una radio sin icy-* no se confunde con una pista que acabó.
+- Rechazo: con 401/402/403/407/429/451, o una página web donde iba el
+  audio, el proxy hace una sola petición y avisa (rejected): se para a la
+  primera, sin reintentar ni saltar al siguiente espejo, con un mensaje que
+  lleva el código (con el 429, que la emisora pide esperar).
+- Tope global: más de RATE_MAX_CONNECTIONS conexiones con el origen en
+  RATE_WINDOW_S (las del proxy y las directas, desde que se le dio a
+  reproducir ese item) → se para con un mensaje claro, sin bucles.
+- Búfer adaptativo: cada corte de un directo confirmado que ya sonaba sube
+  un escalón de BUFFER_STEPS_S y la reconexión lleva esa precarga
+  ('buffering' mientras tanto; current()['buffer_s'] dice los segundos, 0
+  sin precarga); con precarga, el proxy además empalma él solo los cortes
+  cortos. Cambiar de item lo vuelve a 0; pausar y reanudar arranca sin
+  precarga pero conserva el escalón. Sin HLS ni archivos locales ni pistas
+  finitas, y sin guardarlo entre sesiones.
 - «En directo» = duración 0 tras 1,5 s sonando (isSeekable() no sirve: el
   backend FFmpeg lo da True también en las radios). Solo se guarda en el item
   si lo confirman las cabeceras icy-* (o lo dijo el resolver): un MP3 servido
@@ -40,8 +63,8 @@ Contrato con la interfaz (resumen; detalle en cada método):
   también se desconecta, recordando la posición: al reanudar se recarga y
   salta ahí (el servidor cortaría una conexión parada en un descanso).
 - Constructor: además de parent y data_handler admite lofi_dir (carpeta lofi;
-  por defecto MUSIC_DIR), reconnect_delays, buffer_steps e icy_poll_ms (para
-  los tests).
+  por defecto MUSIC_DIR), reconnect_delays y buffer_steps (para los tests;
+  los tiempos del proxy son atributos de clase de StreamBuffer).
   Sin data_handler la biblioteca vive solo en memoria. Si data_handler.data
   se reemplaza (importar un backup, borrar datos) la biblioteca se relee.
   La pista actual y lo aprendido al sonar se guardan con retardo, como el
@@ -66,10 +89,9 @@ from core.music_library import (EXT_MIME, HLS_EXTS, LOFI_LIST_ID, MAX_ITEMS_PER_
                                 REPEAT_MODES, Entry, MusicLibrary, classify_link, codec_name,
                                 scan_audio_folder, source_ext, title_from_source,
                                 update_item_fields)
-from services.icy_monitor import IcyMonitor
 from services.music_resolver import (MSG_HLS_UNSAFE, Deadline, ResolveResult,
                                      local_hls_file_ok, resolve_link)
-from services.stream_buffer import PREFILL_GRACE_S, StreamBuffer
+from services.stream_buffer import PREFILL_GRACE_S, ConnectionBudget, StreamBuffer
 from utils.paths import app_base
 
 # Junto al exe cuando la app está empaquetada: el usuario suelta sus pistas ahí
@@ -103,7 +125,9 @@ class MusicService(QObject):
     ERROR_SKIP_MS = 1000
     STALL_MS = 15000          # directo que deja de avanzar → reconectar
     LOAD_TIMEOUT_MS = 30000   # no empieza a sonar (o finita atascada) → fallo
-    STABLE_MS = 15000         # sonando este tiempo seguido → se reinician los intentos
+    # Sonando este tiempo seguido → se reinician los intentos. Largo a propósito:
+    # una emisora que se corta cada poco no debe reintentar sin fin
+    STABLE_MS = 60000
     VOLUME_SAVE_MS = 800
     PREV_RESTART_MS = 3000    # «anterior» con la pista avanzada: vuelve al inicio
     WATCHDOG_MS = 1000
@@ -111,11 +135,13 @@ class MusicService(QObject):
     # Búfer adaptativo: segundos de precarga tras el 1.º, 2.º, 3.º… corte (tope el último)
     BUFFER_STEPS_S: Tuple[float, ...] = (5, 10, 15, 20)
     LIVE_STALLED_MS = 5000    # directo atascado (StalledMedia) sin avanzar → corte
+    # Tope global de conexiones con la emisora de un item (proxy + directas)
+    RATE_MAX_CONNECTIONS = 10
+    RATE_WINDOW_S = 600
 
     def __init__(self, parent: Optional[QObject] = None, data_handler=None,
                  lofi_dir: Optional[Path] = None,
                  reconnect_delays: Optional[Iterable[int]] = None,
-                 icy_poll_ms: Optional[int] = None,
                  buffer_steps: Optional[Iterable[float]] = None):
         super().__init__(parent)
         self._dh = data_handler
@@ -141,8 +167,6 @@ class MusicService(QObject):
         self._player.seekableChanged.connect(self._on_media_info)
         self._player.metaDataChanged.connect(self._on_metadata)
 
-        self._icy = IcyMonitor(self, poll_ms=icy_poll_ms)
-        self._icy.info_changed.connect(self._on_icy)
         self._init_buffer()
 
         # Estado de reproducción
@@ -440,7 +464,6 @@ class MusicService(QObject):
             deadline.abort()
         self._link_deadlines.clear()
         self.stop()
-        self._icy.stop()
         self._stream_buffer.shutdown()
 
     def next(self) -> None:
@@ -907,7 +930,6 @@ class MusicService(QObject):
         reanudar se daría por fallida y saltaría a la siguiente."""
         self._active = False
         self._stop_timers()
-        self._icy.stop()
         self._stream_buffer.close()
         if self._loaded_key is None:
             return
@@ -936,6 +958,7 @@ class MusicService(QObject):
         self._loaded_key = None
         self._stream_buffer.close()
         self._buffer_s = 0
+        self._proxied = False
 
     def _start_sound(self) -> None:
         item = self._current_item()
@@ -960,6 +983,10 @@ class MusicService(QObject):
         self._stop_timers()
         if not reconnect:
             self._attempts = 0
+            self._budget = None       # se le dio a reproducir: el tope empieza de cero
+        elif self._budget is not None and self._budget.full():
+            self._give_up(*self._too_many_texts())
+            return
         if item['kind'] == 'file' and not os.path.isfile(item['source']):
             self._unload()
             self._active = True
@@ -976,7 +1003,11 @@ class MusicService(QObject):
             return
         url = (QUrl(item['source']) if item['kind'] == 'url'
                else QUrl.fromLocalFile(item['source']))
-        url = self._buffered_url(item, reconnect) or url
+        local = self._buffered_url(item, reconnect)
+        if local is None and self._proxy_eligible(item) and not self._connection_budget().take():
+            self._give_up(*self._too_many_texts())   # directo: también cuenta
+            return
+        url = local or url
         self._active = True
         self._progressed = False
         self._last_pos = -1
@@ -998,8 +1029,6 @@ class MusicService(QObject):
             return  # falló al instante (lo gestiona _dispatch_event)
         self._player.play()
         self._watchdog.start(self.WATCHDOG_MS)
-        if self._is_live():
-            self._icy.start(item['source'])
         self.now_playing_changed.emit()
 
     def _mark_playing(self) -> None:
@@ -1029,10 +1058,6 @@ class MusicService(QObject):
             # Duración 0 a secas no basta para guardarlo: un MP3 servido sin
             # Content-Length también la da (lo confirma _on_icy o el resolver)
             self._update_current_item(live=True)
-        if live and self._active and not self._icy.active:
-            self._icy.start(item['source'])
-        elif not live and self._icy.active:
-            self._icy.stop()
         self.now_playing_changed.emit()
 
     def _live_confirmed(self) -> bool:
@@ -1124,6 +1149,8 @@ class MusicService(QObject):
         if item is None:
             self._give_up("No se pudo reproducir")
             return
+        if self._stop_if_rejected():
+            return   # ni reintentar ni saltar al siguiente espejo
         if self._treat_as_live():
             self._schedule_reconnect()
             return
@@ -1155,7 +1182,6 @@ class MusicService(QObject):
 
     def _give_up(self, message: str, short: str = '') -> None:
         self._stop_timers()
-        self._icy.stop()
         self._unload()
         self._set_want(False)
         self._error_text = short or message
@@ -1164,6 +1190,11 @@ class MusicService(QObject):
         self.error_occurred.emit(message)
 
     def _schedule_reconnect(self) -> None:
+        if self._stop_if_rejected():
+            return
+        if self._budget is not None and self._budget.full():
+            self._give_up(*self._too_many_texts())
+            return
         self._bump_buffer()
         self._stop_timers()
         self._unload()
@@ -1245,7 +1276,7 @@ class MusicService(QObject):
 
     def _on_icy(self, info: Dict[str, Any]) -> None:
         if not any(info.get(k) for k in ('title', 'name', 'bitrate')):
-            return  # consulta fallida: se conserva lo último que se supo
+            return  # nada útil (una radio sin icy-*): se conserva lo último que se supo
         self._icy_info = dict(info)
         # Cabeceras o metadatos ICY: es una radio de verdad, y se guarda
         self._icy_confirmed = True
@@ -1256,51 +1287,112 @@ class MusicService(QObject):
             self._update_current_item(mime=info['mime'])   # para mostrar el códec
         self.now_playing_changed.emit()
 
-    # ---------- búfer adaptativo de los directos ----------
+    # ---------- proxy local: una sola conexión, títulos ICY y búfer ----------
     def _init_buffer(self) -> None:
-        self._buffer_level = 0        # escalón de BUFFER_STEPS_S (0 = conexión directa)
-        self._buffer_s = 0            # precarga de la conexión en curso (0 = directa)
-        self._buffer_skip = False     # el intento por el búfer falló: el siguiente, directo
+        self._buffer_level = 0        # escalón de BUFFER_STEPS_S (0 = sin precarga)
+        self._buffer_s = 0            # precarga de la conexión en curso (0 = sin precarga)
+        self._buffer_skip = False     # el intento por el proxy falló por la red: el siguiente, directo
+        self._proxied = False         # la conexión en curso va por el proxy local
+        self._proxy_sid = 0           # su sesión: las señales de otras se ignoran
+        self._budget: Optional[ConnectionBudget] = None   # tope de conexiones de esta escucha
         self._stalled_at: Optional[float] = None   # StalledMedia sin avanzar desde
         self._stream_buffer = StreamBuffer(self)
         self._stream_buffer.bypassed.connect(self._on_buffer_bypassed)
+        self._stream_buffer.track_detected.connect(self._on_buffer_track)
+        self._stream_buffer.rejected.connect(self._on_buffer_rejected)
+        self._stream_buffer.metadata.connect(self._on_buffer_meta)
         self._net_timeout_default = self._player.playbackOptions().networkTimeout()
 
-    def _buffer_eligible(self, item: Optional[Dict[str, Any]]) -> bool:
-        """¿Directo por enlace que se puede almacenar? HLS no: FFmpeg ya guarda
-        segmentos enteros y un proxy de bytes no reescribe la lista. Solo un
-        directo confirmado: durar 0 no basta (una pista servida sin
-        Content-Length también lo da) y el proxy la repetiría sin fin."""
-        return (item is not None and item['kind'] == 'url' and self._treat_as_live()
-                and self._live_confirmed()
+    def _proxy_eligible(self, item: Optional[Dict[str, Any]]) -> bool:
+        """¿Suena a través del proxy? Todo enlace que puede ser un directo (no
+        HLS: FFmpeg pide segmentos y el proxy no reescribe la lista; no una
+        pista ya conocida: necesita Range para saltar). Así el proxy es la
+        única conexión con la emisora."""
+        return (item is not None and item['kind'] == 'url'
+                and item.get('live') is not False and self._live_runtime is not False
                 and source_ext(item['source']) not in HLS_EXTS)
+
+    def _buffer_eligible(self, item: Optional[Dict[str, Any]]) -> bool:
+        """¿Lleva precarga al reconectar? Solo un directo confirmado: durar 0
+        no basta (una pista servida sin Content-Length también lo da) y el
+        proxy la repetiría al empalmar."""
+        return (self._proxy_eligible(item) and self._treat_as_live()
+                and self._live_confirmed())
+
+    def _connection_budget(self) -> ConnectionBudget:
+        if self._budget is None:
+            self._budget = ConnectionBudget(self.RATE_MAX_CONNECTIONS, self.RATE_WINDOW_S)
+        return self._budget
+
+    def _too_many_texts(self) -> Tuple[str, str]:
+        minutes = max(1, round(self.RATE_WINDOW_S / 60))
+        return (f"La emisora corta la conexión una y otra vez (más de "
+                f"{self.RATE_MAX_CONNECTIONS} veces en {minutes} minutos): la música se "
+                f"detiene para no insistir. Vuelve a darle a reproducir en unos minutos.",
+                "La emisora corta una y otra vez")
+
+    @staticmethod
+    def _rejected_texts(status: int) -> Tuple[str, str]:
+        """(aviso, motivo corto) de un rechazo de la emisora."""
+        if status == 429:
+            return ("La emisora pide esperar antes de volver a conectar (HTTP 429). "
+                    "Vuelve a darle a reproducir en unos minutos.",
+                    "La emisora pide esperar (HTTP 429)")
+        advice = ("Si es una radio de pago, comprueba que no esté sonando en otro "
+                  "dispositivo y vuelve a darle a reproducir en unos minutos.")
+        if status >= 400:
+            return (f"La emisora rechazó la conexión (HTTP {status}). {advice}",
+                    f"Rechazada por la emisora (HTTP {status})")
+        return (f"La emisora rechazó la conexión: envió una página web en vez del "
+                f"audio. {advice}", "Rechazada por la emisora (página web)")
+
+    def _stop_if_rejected(self) -> bool:
+        """¿La emisora rechazó la conexión en curso? Entonces se para ya (el
+        aviso del proxy pudo llegar después del fallo de FFmpeg)."""
+        last = self._stream_buffer.last_rejected
+        if not (self._proxied and last and last[0] == self._proxy_sid):
+            return False
+        self._give_up(*self._rejected_texts(last[1]))
+        return True
 
     def _bump_buffer(self) -> None:
         """Un corte de un directo que ya sonaba sube un escalón (hasta el tope).
-        Los reintentos que no llegan a sonar no suben; si el que falla iba por
-        el búfer, el siguiente va directo (por si el proxy es el problema)."""
+        Los reintentos que no llegan a sonar no suben. Si el que falla iba por
+        el proxy y no llegó a sonar por un fallo de red (no una respuesta del
+        origen, que diría lo mismo a FFmpeg), el siguiente va directo, por si
+        el problema es del proxy (certificados, un proxy del sistema…)."""
         if self._progressed and self._buffer_eligible(self._current_item()):
             self._buffer_level = min(self._buffer_level + 1, len(self.BUFFER_STEPS_S))
-        self._buffer_skip = bool(self._buffer_s and not self._progressed)
+        failure = self._stream_buffer.last_failure
+        self._buffer_skip = bool(self._proxied and not self._progressed and failure
+                                 and failure == (self._proxy_sid, 'network'))
 
     def _buffered_url(self, item: Dict[str, Any], reconnect: bool) -> Optional[QUrl]:
-        """La URL del proxy local si toca búfer (solo al reconectar tras un
-        corte); None = conexión directa. Fija self._buffer_s."""
+        """La URL del proxy local (con la precarga del escalón solo al
+        reconectar tras un corte; si no, 0); None = conexión directa. Fija
+        self._buffer_s y self._proxied."""
         self._buffer_s = 0
+        self._proxied = False
         url = None
         skip, self._buffer_skip = self._buffer_skip, False
-        if reconnect and not skip and self._buffer_level > 0 and self._buffer_eligible(item):
-            steps = self.BUFFER_STEPS_S
-            seconds = steps[min(self._buffer_level, len(steps)) - 1]
-            local = self._stream_buffer.open(item['source'], seconds)
+        if not skip and self._proxy_eligible(item):
+            seconds = 0
+            if reconnect and self._buffer_level > 0 and self._buffer_eligible(item):
+                steps = self.BUFFER_STEPS_S
+                seconds = steps[min(self._buffer_level, len(steps)) - 1]
+            local = self._stream_buffer.open(item['source'], seconds,
+                                             known_live=self._live_confirmed(),
+                                             budget=self._connection_budget())
             if local is not None:   # si el proxy no abre, se conecta directo
                 self._buffer_s = seconds
+                self._proxied = True
+                self._proxy_sid = self._stream_buffer.session_id
                 url = QUrl(local)
         else:
             self._stream_buffer.close()
-        # El proxy retiene las cabeceras hasta tener la precarga: que FFmpeg
-        # no dé la conexión por muerta mientras tanto
-        extra = (self._buffer_s + PREFILL_GRACE_S) * 1000 if self._buffer_s else 0
+        # El proxy retiene las cabeceras hasta tener la precarga (o el primer
+        # byte) y reconecta él solo: que FFmpeg no dé la conexión por muerta
+        extra = (self._buffer_s + PREFILL_GRACE_S) * 1000 if self._proxied else 0
         timeout = int(self._net_timeout_default + extra)
         opts = self._player.playbackOptions()
         if opts.networkTimeout() != timeout:
@@ -1308,10 +1400,35 @@ class MusicService(QObject):
             self._player.setPlaybackOptions(opts)
         return url
 
+    def _on_buffer_meta(self, sid: int, info: Any) -> None:
+        """Cabeceras icy-* y títulos que el proxy lee en su única conexión."""
+        if sid == self._proxy_sid and self._proxied and isinstance(info, dict):
+            self._on_icy(info)
+
+    def _on_buffer_rejected(self, sid: int, status: int) -> None:
+        """401/403…: la emisora no nos quiere ahora (cuenta en otro sitio o en
+        pausa). Insistir solo alarga la pausa: se para a la primera."""
+        if sid != self._proxy_sid or not self._proxied or not self._want:
+            return
+        self._give_up(*self._rejected_texts(status))
+
+    def _on_buffer_track(self, sid: int) -> None:
+        """Las cabeceras dicen que es una pista: suena directa (302, con Range
+        para saltar) y se recuerda."""
+        if sid != self._proxy_sid or not self._proxied:
+            return
+        self._live_runtime = False
+        self._update_current_item(live=False)
+        self.now_playing_changed.emit()
+
     def _on_buffer_bypassed(self, sid: int) -> None:
-        """El origen no se dejó almacenar (HLS, error…): el reproductor sigue
-        la redirección y conecta directo."""
-        if sid != self._stream_buffer.session_id or not self._buffer_s:
+        """El proxy redirigió (una pista, HLS, «ICY 200 OK», un certificado o
+        un proxy del sistema que solo le fallan a él): el reproductor sigue la
+        redirección y conecta directo."""
+        if sid != self._proxy_sid or not self._proxied:
+            return
+        self._proxied = False
+        if not self._buffer_s:
             return
         self._buffer_s = 0
         # El watchdog ya no cuenta la precarga: la conexión directa empieza
