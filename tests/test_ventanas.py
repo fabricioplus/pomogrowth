@@ -1,0 +1,808 @@
+"""Ventanas tras «dejó de mostrarse encima y ni minimizando ni con la
+compacta funcionaba» (noviembre de 2026, con la radio online caída).
+
+No se reprodujo una pérdida directa del «siempre visible», pero sí fallos que
+impedían recuperarlo o dejaban la app bloqueada:
+- la marca «Siempre visible» de la bandeja no seguía a Ajustes y su clic
+  hacía lo contrario de lo que mostraba;
+- cambiarla con la ventana minimizada la restauraba de golpe;
+- «Mostrar PomoGrowth» con la compacta abierta dejaba las dos ventanas;
+- pedir la compacta a mitad del desvanecido de minimizar dejaba la principal
+  minimizada y visible;
+- nada reponía el «encima de todo» nativo (WS_EX_TOPMOST) si Windows u otra
+  app lo quitaba;
+- una segunda instancia solo avisaba, sin traer al frente la abierta;
+- el aviso de la música tapaba los controles de la compacta y se apilaba;
+- modales colgados de la principal oculta o minimizada bloqueaban la
+  compacta sin verse.
+Y el diagnóstico para la próxima vez: faulthandler, el vigía del hilo de la
+interfaz y el log de la música.
+
+Offscreen no tiene HWND: el «encima de todo» nativo se simula (fixture
+`native`), salvo un test con una ventana Win32 real, oculta y sin activar.
+
+Ejecutar desde la raíz del repositorio:
+    QT_QPA_PLATFORM=offscreen python -m pytest tests/test_ventanas.py -q
+Trabaja sobre datos sintéticos en un directorio temporal — nunca los reales.
+"""
+import json
+import logging
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+import pytest
+
+V9 = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(V9))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PySide6.QtCore import QPoint, QRect, Qt, QTimer  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from core.data_handler import DataHandler  # noqa: E402
+from ui.theme import fonts  # noqa: E402
+
+ID1 = 1764282734316
+
+
+def _make_data(tmp_path: Path) -> Path:
+    data = {'tasks': [{'id': ID1, 'name': 'Informe', 'completed': False, 'tags': [],
+                       'source': 'local', 'asana_id': None, 'due': None}],
+            'deleted_tasks': [], 'time_chunks': [], 'history': [], 'ui_snapshot': {},
+            'settings': {'task_sort_mode': 'manual', 'always_on_top': True}}
+    p = tmp_path / "data.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    return p
+
+
+@pytest.fixture
+def ctrl(qtbot, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    fonts.init_fonts()
+    dh = DataHandler(_make_data(tmp_path))
+    dh.send_asana_ops = lambda ops, *a, **k: [
+        {'id': op['id'], 'rev': op.get('rev', 0), 'outcome': 'skipped',
+         'detail': '', 'offline': False} for op in ops]
+    from ui.controllers.app_controller import AppController
+    from ui.windows.main_window import MainWindow
+    win = MainWindow(dh.data.get('settings', {}))
+    qtbot.addWidget(win)
+    controller = AppController(win, dh)
+    # El tick (cada 250 ms) también repone el «encima de todo»: parado, los
+    # tests lo llaman cuando toca
+    controller._tick_timer.stop()
+    win.show()
+    qtbot.waitExposed(win)
+    yield controller
+    if controller.compact_window is not None:
+        controller.compact_window.hide()
+
+
+class _Native:
+    """«Encima de todo» nativo simulado: estado por HWND (por defecto, lo
+    tiene) y las llamadas a set_topmost."""
+
+    def __init__(self):
+        self.top = {}
+        self.calls = []
+
+    def is_topmost(self, hwnd):
+        return self.top.get(int(hwnd), True)
+
+    def set_topmost(self, hwnd, on):
+        self.calls.append((int(hwnd), bool(on)))
+        self.top[int(hwnd)] = bool(on)
+        return True
+
+
+@pytest.fixture
+def native(monkeypatch):
+    from utils import win_native
+    fake = _Native()
+    monkeypatch.setattr(win_native, "is_topmost", fake.is_topmost)
+    monkeypatch.setattr(win_native, "set_topmost", fake.set_topmost)
+    return fake
+
+
+def _top(w) -> bool:
+    return bool(w.windowFlags() & Qt.WindowStaysOnTopHint)
+
+
+def _hwnd(w) -> int:
+    return int(w.winId())
+
+
+def _tray_action(ctrl, text):
+    return next(a for a in ctrl.tray.contextMenu().actions() if a.text() == text)
+
+
+def _toasts(monkeypatch, name="show_success"):
+    from ui.widgets import toast
+    seen = []
+    real = getattr(toast, name)
+
+    def spy(win, msg, duration=3000):
+        seen.append((win, msg))
+        return real(win, msg, duration)
+    monkeypatch.setattr(toast, name, spy)
+    return seen
+
+
+# ---------- 1. «Siempre visible» de la bandeja sincronizado con Ajustes ----------
+
+def test_la_bandeja_sigue_a_ajustes_y_hace_lo_que_muestra(ctrl):
+    action = _tray_action(ctrl, "Siempre visible")
+    fired = []
+    action.toggled.connect(lambda on: fired.append(('toggled', on)))
+    action.triggered.connect(lambda on: fired.append(('triggered', on)))
+    assert action.isChecked() and _top(ctrl.window)
+
+    s = ctrl.data_handler.load_settings()
+    s['always_on_top'] = False
+    ctrl.data_handler.save_settings(s)
+    ctrl.apply_settings(s)                         # «Guardar» en Ajustes
+    assert not action.isChecked() and not _top(ctrl.window)
+    assert fired == []                             # sin disparar su señal
+
+    action.trigger()                               # el usuario lo quiere encendido
+    assert action.isChecked() and _top(ctrl.window) and ctrl.window.isVisible()
+    assert ctrl.data_handler.load_settings()['always_on_top'] is True
+    action.trigger()
+    assert not action.isChecked() and not _top(ctrl.window)
+    assert ctrl.data_handler.load_settings()['always_on_top'] is False
+
+
+def test_desde_la_bandeja_no_sale_configuracion_guardada(ctrl, monkeypatch):
+    seen = _toasts(monkeypatch)
+    _tray_action(ctrl, "Siempre visible").trigger()
+    assert not _top(ctrl.window)
+    assert not [m for _w, m in seen if m == "Configuración guardada"]
+    ctrl.apply_settings(ctrl.data_handler.load_settings())   # desde Ajustes, sí
+    assert [m for _w, m in seen if m == "Configuración guardada"]
+
+
+# ---------- 2. Cambiarlo con la ventana minimizada ----------
+
+def test_cambiarlo_minimizada_la_deja_minimizada(ctrl, qtbot, monkeypatch):
+    """Offscreen conserva el estado minimizado aunque se llame a show(), pero
+    Windows no: show() tras setWindowFlag la restauraba de golpe (comprobado
+    con la plataforma real). Por eso se mira también qué se llamó."""
+    win = ctrl.window
+    win.showMinimized()
+    qtbot.waitUntil(win.isMinimized, timeout=2000)
+    called = []
+    for name in ("show", "showMinimized", "showNormal"):
+        real = getattr(win, name)
+        monkeypatch.setattr(win, name, lambda real=real, name=name: (called.append(name),
+                                                                    real()))
+    action = _tray_action(ctrl, "Siempre visible")
+    action.trigger()
+    qtbot.wait(50)
+    assert not _top(win) and win.isMinimized()
+    action.trigger()
+    qtbot.wait(50)
+    assert _top(win) and win.isMinimized()
+    assert called == ["showMinimized", "showMinimized"]
+
+
+# ---------- 3. «Mostrar PomoGrowth» pasa por show_normal ----------
+
+@pytest.mark.parametrize("how", ["accion", "doble-clic", "metodo"])
+def test_mostrar_desde_la_bandeja_con_la_compacta(ctrl, qtbot, how):
+    from PySide6.QtWidgets import QSystemTrayIcon
+    ctrl.show_compact()
+    assert ctrl.compact_window.isVisible() and not ctrl.window.isVisible()
+    if how == "accion":
+        _tray_action(ctrl, "Mostrar PomoGrowth").trigger()
+    elif how == "doble-clic":
+        ctrl.tray.activated.emit(QSystemTrayIcon.DoubleClick)
+    else:
+        ctrl.show_from_tray()
+    assert ctrl.window.isVisible() and not ctrl.compact_window.isVisible()
+    qtbot.waitUntil(lambda: ctrl.window.windowOpacity() > 0.99, timeout=2000)
+
+
+# ---------- 4. La compacta a mitad del desvanecido de minimizar ----------
+
+def test_compacta_durante_el_desvanecido_de_minimizar(ctrl, qtbot):
+    win = ctrl.window
+    win.fade_minimize()
+    qtbot.wait(40)
+    assert win.is_fading()
+    ctrl.show_compact()
+    qtbot.wait(500)                                # más que el desvanecido (170 ms)
+    assert not win.isVisible() and not win.isMinimized()
+    assert win.windowOpacity() == pytest.approx(win._base_opacity, abs=0.01)
+    assert ctrl.compact_window.isVisible()
+    ctrl.show_normal()                             # y se vuelve sin problemas
+    qtbot.waitUntil(lambda: win.isVisible() and win.windowOpacity() > 0.99, timeout=2000)
+    assert not win.isMinimized() and not ctrl.compact_window.isVisible()
+
+
+def test_minimizar_sigue_minimizando(ctrl, qtbot):
+    """El guardia del final del desvanecido no estorba al caso normal."""
+    win = ctrl.window
+    win.fade_minimize()
+    qtbot.waitUntil(win.isMinimized, timeout=2000)
+    qtbot.wait(200)
+    assert win.windowOpacity() == pytest.approx(win._base_opacity, abs=0.01)
+
+
+# ---------- 5. «Encima de todo» nativo ----------
+
+def test_el_tick_repone_el_encima_de_todo_y_lo_apunta(ctrl, native, caplog):
+    win = ctrl.window
+    native.top[_hwnd(win)] = False                 # Windows u otra app se lo quitó
+    with caplog.at_level(logging.INFO):
+        ctrl._keep_on_top()
+    assert native.calls == [(_hwnd(win), True)]
+    assert [r for r in caplog.records if "principal" in r.getMessage()
+            and "repuesto" in r.getMessage()]
+    caplog.clear()
+    with caplog.at_level(logging.INFO):
+        ctrl._keep_on_top()                        # ya lo tiene: ni se toca
+    assert native.calls == [(_hwnd(win), True)] and not caplog.records
+
+
+def test_el_tick_lo_mira_cada_dos_segundos(ctrl, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ctrl, "_keep_on_top", lambda: calls.append(1))
+    for _ in range(ctrl.TOPMOST_CHECK_TICKS * 3):
+        ctrl._tick()
+    assert len(calls) == 3
+    assert ctrl.TOPMOST_CHECK_TICKS * 250 == pytest.approx(2000, abs=250)
+
+
+def test_no_toca_la_principal_si_no_toca(ctrl, native, qtbot):
+    win = ctrl.window
+    native.top[_hwnd(win)] = False
+    # Sin «Siempre visible»
+    s = ctrl.data_handler.load_settings()
+    s['always_on_top'] = False
+    ctrl.apply_settings(s)
+    native.calls.clear()
+    native.top[_hwnd(win)] = False
+    ctrl._keep_on_top()
+    assert native.calls == []
+    s['always_on_top'] = True
+    ctrl.apply_settings(s)
+    native.calls.clear()
+    native.top[_hwnd(win)] = False
+    # Desvaneciéndose
+    win.fade_minimize()
+    ctrl._keep_on_top()
+    assert native.calls == []
+    # Minimizada
+    qtbot.waitUntil(win.isMinimized, timeout=2000)
+    ctrl._keep_on_top()
+    assert native.calls == []
+    # Oculta (en la bandeja)
+    win.showNormal()
+    qtbot.wait(300)
+    native.calls.clear()
+    native.top[_hwnd(win)] = False
+    win.hide()
+    ctrl._keep_on_top()
+    assert native.calls == []
+
+
+def test_la_compacta_tambien(ctrl, native, caplog):
+    ctrl.show_compact()
+    cw = ctrl.compact_window
+    native.calls.clear()
+    native.top[_hwnd(cw)] = False
+    with caplog.at_level(logging.INFO):
+        ctrl._keep_on_top()
+    assert (_hwnd(cw), True) in native.calls
+    assert [r for r in caplog.records if "compacta" in r.getMessage()]
+    native.calls.clear()
+    cw.hide()                                      # oculta: no se mira
+    native.top[_hwnd(cw)] = False
+    ctrl._keep_on_top()
+    assert (_hwnd(cw), True) not in native.calls
+
+
+def test_al_mostrar_y_restaurar_se_repone(ctrl, native, qtbot):
+    win = ctrl.window
+    # Mostrar la compacta (su showEvent)
+    ctrl.show_compact()
+    assert (_hwnd(ctrl.compact_window), True) in native.calls
+    # Volver a la principal (fade_show), aunque ya lo tuviera
+    native.calls.clear()
+    ctrl.show_normal()
+    assert (_hwnd(win), True) in native.calls
+    # Salir de minimizada (barra de tareas, Alt+Tab)
+    qtbot.waitUntil(lambda: win.windowOpacity() > 0.99, timeout=2000)
+    win.showMinimized()
+    qtbot.waitUntil(win.isMinimized, timeout=2000)
+    native.calls.clear()
+    win.showNormal()
+    qtbot.waitUntil(lambda: not win.isMinimized(), timeout=2000)
+    assert (_hwnd(win), True) in native.calls
+
+
+def test_guardar_en_ajustes_lo_repone_aunque_el_flag_coincida(ctrl, native):
+    win = ctrl.window
+    native.top[_hwnd(win)] = False                 # Qt cree que sí; Windows dice que no
+    ctrl.apply_settings(ctrl.data_handler.load_settings())
+    assert native.calls == [(_hwnd(win), True)] and native.top[_hwnd(win)]
+    # Sin «Siempre visible» y la ventana aún encima de todo: se le quita
+    s = ctrl.data_handler.load_settings()
+    s['always_on_top'] = False
+    ctrl.apply_settings(s)                         # cambia el flag de Qt
+    native.calls.clear()
+    native.top[_hwnd(win)] = True
+    ctrl.apply_settings(s)                         # el flag ya coincide
+    assert native.calls == [(_hwnd(win), False)]
+
+
+def test_win_native_inofensivo_sin_ventanas_nativas(ctrl):
+    """Con Qt offscreen, winId() no es un HWND: ni se lee ni se cambia."""
+    from utils import win_native
+    hwnd = _hwnd(ctrl.window)
+    assert win_native.is_topmost(hwnd) is None
+    assert win_native.set_topmost(hwnd, True) is False
+    assert win_native.keep_topmost(hwnd, "principal", force=True) is False
+    assert win_native.is_topmost(0) is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="WS_EX_TOPMOST es de Windows")
+def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
+    """Una ventana Win32 real, oculta y sin activar (nada se ve): poner y
+    quitar el «encima de todo» y reponerlo con su línea en el log."""
+    import ctypes
+    from ctypes import wintypes
+    from utils import win_native
+    monkeypatch.setattr(win_native, "_native_windows", lambda: True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.CreateWindowExW.restype = wintypes.HWND
+    user32.CreateWindowExW.argtypes = (
+        wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_int,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.HWND, wintypes.HMENU,
+        wintypes.HINSTANCE, wintypes.LPVOID)
+    user32.DestroyWindow.argtypes = (wintypes.HWND,)
+    user32.IsWindowVisible.argtypes = (wintypes.HWND,)
+    hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth prueba", 0, 0, 0, 10, 10,
+                                  None, None, None, None)
+    assert hwnd
+    try:
+        assert win_native.is_topmost(hwnd) is False
+        assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
+        assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
+        with caplog.at_level(logging.INFO):
+            assert win_native.keep_topmost(hwnd, "prueba") is True
+            assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
+        assert win_native.is_topmost(hwnd) is True
+        assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        assert not user32.IsWindowVisible(hwnd)    # nunca se mostró
+    finally:
+        user32.DestroyWindow(hwnd)
+    assert win_native.is_topmost(hwnd) is None     # ya no es una ventana
+
+
+# ---------- 6. Segunda instancia ----------
+
+def _channel():
+    return f"PomoGrowth-prueba-{uuid.uuid4().hex}"   # nunca el de la app de verdad
+
+
+_SECOND = ("import sys, time; sys.path.insert(0, sys.argv[1])\n"
+           "from PySide6.QtWidgets import QApplication\n"
+           "app = QApplication([])\n"
+           "from services import singleton\n"
+           "start = time.monotonic()\n"
+           "ok = singleton.request_show(sys.argv[2], timeout_ms=int(sys.argv[3]))\n"
+           "print(ok, round(time.monotonic() - start, 3))\n")
+
+
+def _second_instance(qtbot, name, timeout_ms=3000):
+    """request_show() desde otro proceso, como la segunda instancia de
+    verdad (hilo principal con su QApplication). Mientras, este hilo atiende
+    el canal. Devuelve (contestó, segundos que esperó)."""
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.Popen([sys.executable, "-c", _SECOND, str(V9), name, str(timeout_ms)],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    try:
+        qtbot.waitUntil(lambda: proc.poll() is not None, timeout=60000)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    out = proc.stdout.read().split()
+    assert proc.returncode == 0 and len(out) == 2, out
+    return out[0] == "True", float(out[1])
+
+
+def test_la_segunda_instancia_trae_al_frente_la_primera(ctrl, native, qtbot):
+    from services import singleton
+    name = _channel()
+    server = singleton.listen_for_show(ctrl.show_from_other_instance, name=name,
+                                       parent=ctrl)
+    assert server is not None
+    try:
+        ctrl.show_compact()
+        native.calls.clear()
+        answered, _seconds = _second_instance(qtbot, name)
+        assert answered
+        win = ctrl.window
+        assert win.isVisible() and not ctrl.compact_window.isVisible()
+        assert (_hwnd(win), True) in native.calls  # «encima de todo» repuesto
+        qtbot.waitUntil(lambda: win.windowOpacity() > 0.99, timeout=2000)
+    finally:
+        server.close()
+
+
+def test_el_canal_ignora_lo_que_no_es_show(ctrl, qtbot):
+    from PySide6.QtNetwork import QLocalSocket
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name)
+    try:
+        sock = QLocalSocket()
+        sock.connectToServer(name)
+        assert sock.waitForConnected(1000)
+        sock.write(b"borrar todo\n")
+        sock.flush()
+        qtbot.waitUntil(lambda: sock.state() == QLocalSocket.UnconnectedState,
+                        timeout=3000)
+        assert shown == []
+    finally:
+        server.close()
+        server.deleteLater()
+
+
+def test_sin_nadie_escuchando_no_bloquea(qtbot):
+    from services import singleton
+    start = time.monotonic()
+    assert singleton.request_show(_channel(), timeout_ms=800) is False
+    assert time.monotonic() - start < 1.5
+
+
+def test_una_primera_que_no_contesta_no_bloquea_el_arranque(qtbot):
+    """Si la primera está colgada (acepta pero no contesta), la segunda se
+    rinde en su plazo y main.py da el aviso de siempre."""
+    from PySide6.QtNetwork import QLocalServer
+    name = _channel()
+    mute = QLocalServer()
+    assert mute.listen(name)
+    try:
+        answered, seconds = _second_instance(qtbot, name, timeout_ms=700)
+        assert not answered and seconds < 1.5
+    finally:
+        mute.close()
+
+
+def test_el_nombre_del_canal_es_por_usuario_sin_el_nombre(monkeypatch):
+    import getpass
+    from services import singleton
+    monkeypatch.setattr(getpass, "getuser", lambda: "Ana")
+    a = singleton.channel_name()
+    monkeypatch.setattr(getpass, "getuser", lambda: "Luis")
+    b = singleton.channel_name()
+    assert a != b and a.startswith("PomoGrowth-") and "Ana" not in a
+
+
+@pytest.mark.parametrize("elevated, answered, code, warned, asked", [
+    (False, True, 0, False, True),     # la primera contesta: sin aviso
+    (False, False, 1, True, True),     # no contesta: el aviso de siempre
+    (True, True, 1, True, False),      # la relanzada como administrador: aviso
+])
+def test_main_con_otra_instancia_abierta(monkeypatch, qtbot, elevated, answered, code,
+                                         warned, asked):
+    import main
+    from PySide6.QtWidgets import QMessageBox
+    from services import singleton
+    calls = {'asked': 0, 'warned': 0}
+
+    def request_show(*a, **k):
+        calls['asked'] += 1
+        return answered
+    monkeypatch.setattr(singleton, "request_show", request_show)
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k: calls.__setitem__('warned', 1)))
+    assert main._already_running(elevated) == code
+    assert bool(calls['warned']) is warned and bool(calls['asked']) is asked
+
+
+# ---------- 7a. El aviso no tapa la compacta ----------
+
+def _card_rect(t):
+    return QRect(t.mapToGlobal(QPoint(t.PAD, t.PAD)),
+                 t.size() - QRect(0, 0, 2 * t.PAD, 2 * t.PAD).size())
+
+
+def _compact(qtbot, x, y):
+    from ui.windows.compact_window import CompactWindow
+    fonts.init_fonts()
+    c = CompactWindow()
+    qtbot.addWidget(c)
+    c.move(x, y)
+    c.show()
+    qtbot.waitExposed(c)
+    return c
+
+
+def _global(w):
+    return QRect(w.mapToGlobal(QPoint(0, 0)), w.size())
+
+
+@pytest.mark.parametrize("where", ["arriba", "abajo", "izquierda"])
+def test_el_aviso_no_tapa_los_controles_de_la_compacta(qtbot, where):
+    from ui.widgets import toast
+    area = QApplication.primaryScreen().availableGeometry()
+    c = _compact(qtbot, 0, 0)
+    pos = {'arriba': QPoint(area.right() - c.width() - 40, area.top() + 40),
+           'abajo': QPoint(area.right() - c.width() - 40, area.bottom() - c.height()),
+           'izquierda': QPoint(area.left(), area.top() + 40)}[where]
+    c.move(pos)
+    qtbot.wait(20)
+    t = toast.show_warning(c, "Se perdió la conexión con la emisora y no se pudo "
+                              "recuperar", duration=4000)
+    try:
+        qtbot.wait(350)                            # tras su entrada
+        card, compact_card = _card_rect(t), _global(c.card)
+        assert not card.intersects(compact_card)
+        for b in (c.play_btn, c.expand_btn, c.skip_btn):
+            assert not card.intersects(_global(b))
+        assert area.contains(card)                 # recortado a la pantalla
+        if where == "abajo":
+            assert card.bottom() < compact_card.top()      # no cabe debajo: encima
+        else:
+            assert card.top() > compact_card.bottom()      # debajo
+    finally:
+        toast.dismiss(t)
+
+
+def test_en_la_principal_el_aviso_sigue_en_su_esquina(ctrl, qtbot):
+    from ui.widgets import toast
+    win = ctrl.window
+    t = toast.show_info(win, "Tarea añadida", duration=2000)
+    try:
+        qtbot.wait(350)
+        card = _card_rect(t)
+        geo = win.geometry()
+        assert geo.contains(card)
+        assert geo.right() - card.right() == pytest.approx(t.MARGIN, abs=2)
+    finally:
+        toast.dismiss(t)
+
+
+# ---------- 7b/7c. Avisos de la música ----------
+
+def _music_toasts():
+    from ui.widgets import toast
+    return [t for t in toast._active_toasts if toast.Toast._is_alive(t)]
+
+
+def test_un_solo_aviso_de_musica_a_la_vez(ctrl, qtbot):
+    ctrl.music.error_occurred.emit("La emisora o el archivo no responde")
+    first = ctrl._music_toast
+    ctrl.music.error_occurred.emit("Se perdió la conexión con la emisora")
+    qtbot.wait(50)
+    alive = _music_toasts()
+    assert len(alive) == 1 and alive[0] is ctrl._music_toast and alive[0] is not first
+    ctrl._music_toast.dismiss()
+
+
+def test_solo_el_primer_paso_a_la_siguiente_de_una_racha(ctrl, monkeypatch):
+    from services.music_service import MusicService
+    from ui.widgets import toast
+    seen = []
+    monkeypatch.setattr(toast, "show_warning",
+                        lambda win, msg, duration=0: seen.append(msg))
+    state = {'state': 'error', 'want': True}
+    monkeypatch.setattr(MusicService, "state", property(lambda s: state['state']))
+    monkeypatch.setattr(MusicService, "is_playing", property(lambda s: state['want']))
+    emit = ctrl.music.error_occurred.emit
+    emit("No se pudo reproducir «A»: paso a la siguiente")
+    emit("No se pudo reproducir «B»: paso a la siguiente")      # misma racha: calla
+    assert seen == ["No se pudo reproducir «A»: paso a la siguiente"]
+    ctrl.music.state_changed.emit('playing')                     # volvió a sonar
+    emit("No se pudo reproducir «C»: paso a la siguiente")      # racha nueva
+    state['want'] = False                                        # se rindió
+    emit("No se pudo reproducir ninguna pista de la lista")      # el aviso final
+    assert seen[1:] == ["No se pudo reproducir «C»: paso a la siguiente",
+                        "No se pudo reproducir ninguna pista de la lista"]
+
+
+def test_sin_ventana_a_la_vista_la_musica_avisa_en_la_bandeja(ctrl, qtbot, monkeypatch):
+    from ui.widgets import toast
+    toasts, notes = [], []
+    monkeypatch.setattr(toast, "show_warning", lambda *a, **k: toasts.append(a))
+    monkeypatch.setattr(ctrl.tray, "showMessage", lambda title, msg, *a: notes.append(msg))
+    ctrl.window.showMinimized()
+    qtbot.waitUntil(ctrl.window.isMinimized, timeout=2000)
+    ctrl.music.error_occurred.emit("Se perdió la conexión con la emisora")
+    ctrl.music.error_occurred.emit("Otra vez")                  # dentro del minuto
+    assert notes == ["Se perdió la conexión con la emisora"] and toasts == []
+    ctrl._music_tray_at -= ctrl.MUSIC_TRAY_MIN_INTERVAL_S + 1   # pasó el minuto
+    ctrl._on_music_error("No se pudo reproducir «X»: paso a la siguiente", final=False)
+    assert len(notes) == 1                                       # los saltos, no
+    ctrl.music.error_occurred.emit("Se perdió la conexión con la emisora")
+    assert len(notes) == 2
+    # En la bandeja (oculta) y sin compacta, igual
+    ctrl.window.showNormal()
+    ctrl.window.hide()
+    ctrl._music_tray_at = None
+    ctrl.music.error_occurred.emit("Sin red")
+    assert notes[-1] == "Sin red" and toasts == []
+
+
+# ---------- 7d. Ningún modal cuelga de una ventana que no se ve ----------
+
+def _inspect_modal(seen):
+    w = QApplication.activeModalWidget()
+    if w is None:
+        return
+    seen.append((w, w.parentWidget(), w.windowFlags()))
+    w.reject()
+
+
+def test_reabrir_desde_la_compacta_pregunta_sobre_la_compacta(ctrl, qtbot):
+    ctrl.select_task(ID1)
+    ctrl._task_by_id(ID1)['completed'] = True     # p. ej. la completó un sync
+    ctrl.show_compact()
+    seen = []
+    QTimer.singleShot(300, lambda: _inspect_modal(seen))
+    ctrl.compact_window.toggle_requested.emit()
+    assert seen and seen[0][1] is ctrl.compact_window
+    assert seen[0][2] & Qt.WindowStaysOnTopHint   # como su madre, siempre visible
+    assert not ctrl.window.isVisible()
+
+
+def test_error_de_asana_con_la_compacta_es_un_aviso(ctrl, qtbot, monkeypatch):
+    from ui.widgets import toast
+    shown, modals = [], []
+    monkeypatch.setattr(toast, "show_warning",
+                        lambda win, msg, duration=0: shown.append((win, msg)))
+    ctrl.show_compact()
+    QTimer.singleShot(200, lambda: _inspect_modal(modals))
+    ctrl.asana.error.emit("No se pudo conectar con Asana")
+    qtbot.wait(300)
+    assert modals == []
+    assert shown == [(ctrl.compact_window, "Asana: No se pudo conectar con Asana")]
+
+
+def test_error_de_asana_minimizada_va_a_la_bandeja(ctrl, qtbot, monkeypatch):
+    notes, modals = [], []
+    monkeypatch.setattr(ctrl.tray, "showMessage", lambda title, msg, *a: notes.append(msg))
+    ctrl.window.showMinimized()
+    qtbot.waitUntil(ctrl.window.isMinimized, timeout=2000)
+    QTimer.singleShot(200, lambda: _inspect_modal(modals))
+    ctrl.asana.error.emit("Token revocado")
+    qtbot.wait(300)
+    assert modals == [] and notes == ["Token revocado"]
+    assert ctrl.window.isMinimized()
+
+
+def test_error_de_asana_a_la_vista_sigue_siendo_modal(ctrl, monkeypatch):
+    from ui.dialogs import branded_dialogs
+    shown = []
+    monkeypatch.setattr(branded_dialogs, "info",
+                        lambda parent, title, text, *a, **k: shown.append((parent, text)))
+    ctrl.asana.error.emit("Token revocado")
+    assert shown == [(ctrl.window, "Token revocado")]
+
+
+def test_error_de_asana_durante_el_splash_espera_a_la_principal(ctrl, qtbot, monkeypatch):
+    from ui.dialogs import branded_dialogs
+    shown = []
+    monkeypatch.setattr(branded_dialogs, "info",
+                        lambda parent, title, text, *a, **k: shown.append(
+                            (parent, parent.isVisible())))
+    win = ctrl.window
+    win.hide()
+    ctrl._splash = object()                        # arrancando con el splash
+
+    def end_splash(_msg):                          # lo que hace _end_splash
+        ctrl._splash = None
+        win.show()
+    ctrl.asana.error.connect(end_splash)
+    ctrl.asana.error.emit("Sin conexión")
+    assert shown == []
+    qtbot.waitUntil(lambda: bool(shown), timeout=2000)
+    assert shown == [(win, True)]
+
+
+def test_un_modal_con_la_principal_minimizada_la_restaura(ctrl, qtbot, monkeypatch):
+    from ui.dialogs import branded_dialogs
+    seen = []
+    monkeypatch.setattr(branded_dialogs, "info",
+                        lambda parent, title, text, *a, **k: seen.append(
+                            (parent, parent.isMinimized(), parent.isVisible())))
+    win = ctrl.window
+    win.showMinimized()
+    qtbot.waitUntil(win.isMinimized, timeout=2000)
+    ctrl.toggle_timer()                            # sin tarea activa: «Sin tarea activa»
+    assert seen == [(win, False, True)]
+    qtbot.waitUntil(lambda: win.windowOpacity() > 0.99, timeout=2000)
+
+
+def test_los_dialogos_heredan_el_siempre_visible(qtbot):
+    from PySide6.QtWidgets import QWidget
+    from ui.dialogs.branded_dialogs import BrandedDialog
+    fonts.init_fonts()
+    for top in (True, False):
+        parent = QWidget()
+        qtbot.addWidget(parent)
+        parent.setWindowFlag(Qt.WindowStaysOnTopHint, top)
+        dlg = BrandedDialog(parent, "Prueba")
+        assert bool(dlg.windowFlags() & Qt.WindowStaysOnTopHint) is top
+        assert dlg.windowFlags() & Qt.FramelessWindowHint
+        dlg.deleteLater()
+
+
+# ---------- 8. Diagnóstico ----------
+
+def test_faulthandler_al_log_de_fallos(tmp_path, monkeypatch):
+    import faulthandler
+    from utils import logging_setup
+    enabled = []
+    monkeypatch.setattr(faulthandler, "enable",
+                        lambda file=None, all_threads=True: enabled.append((file, all_threads)))
+    monkeypatch.setattr(logging_setup, "_fault_file", None)
+    old = tmp_path / logging_setup.FAULT_LOG_NAME
+    old.write_bytes(b"x" * (logging_setup.FAULT_LOG_MAX_BYTES + 1))   # se rota
+    handle = logging_setup.enable_fault_log(tmp_path, "9.9.9")
+    try:
+        assert handle is not None and logging_setup.fault_log_file() is handle
+        assert enabled == [(handle, True)]
+        assert (tmp_path / (logging_setup.FAULT_LOG_NAME + ".1")).stat().st_size > 1000
+        text = old.read_text(encoding="utf-8")
+        assert text.startswith("--- PomoGrowth 9.9.9") and f"pid {os.getpid()}" in text
+    finally:
+        handle.close()
+
+
+def test_el_vigia_vuelca_las_pilas_si_el_hilo_se_bloquea(tmp_path, qtbot, caplog):
+    import faulthandler
+    from utils import logging_setup
+    path = tmp_path / "fallos.log"
+    handle = open(path, "a", encoding="utf-8")
+    dog = logging_setup.start_ui_watchdog(handle, timeout_s=0.4, interval_ms=50)
+    try:
+        with caplog.at_level(logging.WARNING):
+            qtbot.wait(700)                        # todo va bien: nada
+            assert path.stat().st_size == 0 and not caplog.records
+            time.sleep(1.0)                        # el hilo de la interfaz, bloqueado
+            qtbot.wait(300)
+        text = path.read_text(encoding="utf-8", errors="replace")
+        assert "test_el_vigia_vuelca_las_pilas" in text     # la pila del bloqueo
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1 and "bloqueado" in warnings[0]
+    finally:
+        dog.stop()
+        faulthandler.cancel_dump_traceback_later()
+        handle.close()
+
+
+def test_sin_archivo_no_hay_vigia():
+    from utils import logging_setup
+    assert logging_setup.start_ui_watchdog(None) is None
+
+
+def test_scrub_quita_enlaces_rutas_y_titulos():
+    from utils.logging_setup import scrub
+    text = scrub("No se pudo reproducir «Mi lista secreta»: https://x.example/radio"
+                 "?listen_key=abc y C:\\Users\\Ana\\Music\\a.mp3")
+    assert "abc" not in text and "Ana" not in text and "secreta" not in text
+    assert "<enlace>" in text and "<ruta>" in text and "«…»" in text
+    assert len(scrub("x" * 500)) == 200
+
+
+def test_la_musica_queda_en_el_log_sin_enlaces(ctrl, caplog):
+    with caplog.at_level(logging.INFO):
+        ctrl.music.state_changed.emit('loading')
+        ctrl.music.state_changed.emit('reconnecting')
+        ctrl.music.error_occurred.emit("Falló http://radio.example/stream?key=123")
+    lines = [r.getMessage() for r in caplog.records]
+    assert "Música: idle → loading" in lines and "Música: loading → reconnecting" in lines
+    assert any(line.startswith("Música: Falló <enlace>") for line in lines)
+    assert not any("key=123" in line for line in lines)
+    if ctrl._music_toast is not None:
+        ctrl._music_toast.dismiss()

@@ -10,10 +10,30 @@ else:
     if str(BASE) not in sys.path:
         sys.path.insert(0, str(BASE))
 
-from utils.logging_setup import setup_logging
+from utils.logging_setup import fault_log_file, setup_logging, start_ui_watchdog
 from utils.paths import app_icon_path
 from utils.win_native import hold_named_mutex, set_app_user_model_id
 from core.config import Config
+
+
+def _already_running(elevated: bool) -> int:
+    """Ya hay una PomoGrowth abierta: se le pide que se muestre (sale al
+    frente, sin la compacta) y esta se cierra sin más. Si no contesta a
+    tiempo, o esta es la relanzada como administrador (la otra tendría que
+    cerrarse, no mostrarse), el aviso de siempre. Sin construir toda la app."""
+    from PySide6.QtWidgets import QApplication, QMessageBox
+    from services import singleton
+    # El canal y el aviso necesitan una QApplication viva hasta el final
+    app = QApplication.instance() or QApplication(sys.argv)  # noqa: F841
+    if not elevated and singleton.request_show():
+        return 0
+    QMessageBox.warning(
+        None, "PomoGrowth",
+        "PomoGrowth ya está abierto; quizá esté en la bandeja del sistema, "
+        "junto al reloj.\n\nPara usar el modo enfoque como administrador, "
+        "ciérralo (clic derecho en su icono de la bandeja → Cerrar) y vuelve a "
+        "abrir PomoGrowth con «Ejecutar como administrador».")
+    return 1
 
 
 def main() -> int:
@@ -27,16 +47,7 @@ def main() -> int:
     # instancia anterior puede tardar un poco en cerrarse
     elevated = singleton.ELEVATED_RESTART_FLAG in sys.argv
     if not (singleton.acquire_waiting(10.0) if elevated else singleton.acquire()):
-        # Aviso mínimo sin construir toda la app
-        from PySide6.QtWidgets import QApplication, QMessageBox
-        app = QApplication(sys.argv)
-        QMessageBox.warning(
-            None, "PomoGrowth",
-            "PomoGrowth ya está abierto; quizá esté en la bandeja del sistema, "
-            "junto al reloj.\n\nPara usar el modo enfoque como administrador, "
-            "ciérralo (clic derecho en su icono de la bandeja → Cerrar) y vuelve a "
-            "abrir PomoGrowth con «Ejecutar como administrador».")
-        return 1
+        return _already_running(elevated)
     hold_named_mutex(Config.APP_MUTEX)
 
     from PySide6.QtWidgets import QApplication
@@ -76,6 +87,14 @@ def main() -> int:
 
     from ui.controllers.app_controller import AppController
     controller = AppController(window, data_handler)
+    # Una segunda PomoGrowth (el acceso directo con esta ya abierta) pide por
+    # aquí que esta se muestre, en vez de quedarse en el aviso
+    singleton.listen_for_show(controller.show_from_other_instance, parent=controller)
+    # Vigía del hilo de la interfaz: si se bloquea, sus pilas van al log de
+    # fallos (nada mientras todo va bien)
+    watchdog = start_ui_watchdog(fault_log_file(), parent=app)
+    if watchdog is not None:
+        app.aboutToQuit.connect(watchdog.stop)
     # launch() decide: splash antes de renderizar (auto-sync) o ventana directa
     controller.launch()
     return app.exec()

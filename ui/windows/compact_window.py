@@ -21,6 +21,7 @@ from ui.theme import fonts
 from ui.theme.tokens import ThemeManager, tokens
 from ui.widgets.icon_button import IconButton, tinted_icon
 from ui.widgets.progress_ring import ProgressRing
+from utils import win_native
 
 
 class _ElidedLabel(QLabel):
@@ -223,3 +224,9 @@ class CompactWindow(QWidget):
                 win.startSystemMove()
                 return
         super().mousePressEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # Siempre visible de verdad: si Windows le quitó el «encima de todo»
+        # mientras estaba oculta, se repone al mostrarla (sin activarla)
+        win_native.keep_topmost(int(self.winId()), "compacta", force=True)

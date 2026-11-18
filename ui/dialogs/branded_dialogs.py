@@ -111,7 +111,14 @@ class BrandedDialog(QDialog):
         self._accent_override = accent
         self._accent = accent or t.accent
         self._icon_name = icon
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        flags = Qt.FramelessWindowHint | Qt.Dialog
+        # Sobre una ventana siempre visible (la principal con la opción, la
+        # compacta), el diálogo también lo es: si no, otra app que se ponga
+        # encima lo taparía mientras bloquea esa ventana
+        top = parent_window.window() if parent_window is not None else None
+        if top is not None and top.windowFlags() & Qt.WindowStaysOnTopHint:
+            flags |= Qt.WindowStaysOnTopHint
+        self.setWindowFlags(flags)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
         self._overlay = _Overlay.over(parent_window)
