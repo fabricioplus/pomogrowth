@@ -97,7 +97,7 @@ except ImportError:
 from core.asana_errors import AsanaFetchError, error_from_response
 from core.config import Config
 from core.music_library import default_music, normalize_music
-from core.radio_catalog import apply_default_radios
+from core.radio_catalog import apply_default_radios, declined_radios
 from core.ambient_catalog import normalize_mix as normalize_ambient_mix
 from core.ambient_catalog import clamp_volume
 from utils.safe_json import load_json_safe, save_json_atomic
@@ -963,13 +963,19 @@ class DataHandler:
         # La biblioteca de música no viaja en los backups viejos: sin una
         # válida en el archivo, se conserva la actual (con su marca de las
         # radios de serie ya ofrecidas)
-        if not self._has_valid_music(imported.get('music')):
+        music = imported.get('music')
+        if not self._has_valid_music(music):
             imported['music'] = copy.deepcopy(self.data.get('music') or default_music())
+        elif not isinstance(music.get('seeds'), list):
+            # Música de antes de las radios de serie: hereda la marca de las
+            # que el usuario quitó aquí, para que _load no se las devuelva
+            imported['music'] = {**music, 'seeds': self._declined_radios()}
         self.data = imported
         self._save()
         # Releer con los setdefault/validaciones de _load. Un backup con
         # música pero sin marca de semillas (anterior a las radios de serie)
-        # las recibe ahí; uno con marca se respeta tal cual
+        # recibe ahí las que el usuario no quitó; uno con marca se respeta
+        # tal cual
         self._migrated_on_load = False
         self.data = self._load()
         migrated = self._migrated_on_load
@@ -1498,6 +1504,16 @@ class DataHandler:
         except Exception as e:
             print(f"Advertencia: no se pudieron añadir las radios de serie: {e}")
             return False
+
+    def _declined_radios(self) -> List[str]:
+        """Las radios de serie que el usuario quitó de la biblioteca actual
+        (core/radio_catalog.declined_radios). Ante un fallo, ninguna: lo peor
+        es que una vuelva, y se puede quitar otra vez."""
+        try:
+            return declined_radios(self.get_music())
+        except Exception as e:
+            print(f"Advertencia: no se pudo leer qué radios de serie se quitaron: {e}")
+            return []
 
     def get_music(self) -> Dict[str, Any]:
         """Copia validada de la biblioteca de música (con valores por defecto)."""

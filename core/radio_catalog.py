@@ -2,7 +2,8 @@
 
 Sin Qt (regla de core/), con el patrón de core/ambient_catalog.py: un
 dataclass congelado y una tupla en el orden en que se muestran. Lo usa
-DataHandler._load (y, a través de él, import_data).
+DataHandler: _load siembra (también tras import_data) e import_data le pasa
+a un backup sin marca la de las radios que el usuario quitó.
 
 Contrato:
 - Sembrar es solo datos: las radios entran en data['music'] como elementos
@@ -11,9 +12,12 @@ Contrato:
   quitan, renombran y reordenan como cualquier otra. Nada se conecta a la
   red hasta que el usuario pulsa reproducir.
 - data['music']['seeds'] recuerda los ids del catálogo que ya se ofrecieron,
-  se añadieran o no (ya estaba esa URL en otra lista, o no cabía). Así no se
-  duplican y una radio que el usuario borre no vuelve. Si borra la lista
-  entera, solo una radio NUEVA de una versión futura la vuelve a crear.
+  se añadieran o no (ya estaba esa emisora en otra lista, aunque fuera con
+  la URL escrita algo distinta, o no cabía). Así no se duplican y una radio
+  que el usuario borre no vuelve. Si borra la lista entera, solo una radio
+  NUEVA de una versión futura la vuelve a crear. Tampoco vuelve al importar
+  un backup anterior a las radios de serie (sin 'seeds'): hereda la marca de
+  las que quitó (declined_radios) y recibe el resto.
 - Para un usuario nuevo la lista es la única; a quien ya tenía listas se le
   añade al final. Nunca sobre un archivo de datos que no se pudo leer
   (load_error), y DataHandler.SEED_DEFAULT_RADIOS = False la apaga (así va
@@ -28,9 +32,9 @@ Contrato:
   tests/test_radio_catalog.py lo comprueba sin red.
 """
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from core.music_library import Entry, seed_entries
+from core.music_library import Entry, seed_entries, station_key
 
 SEED_LIST_ID = 'radios-lofi'     # _new_id nunca lo genera: da hex sin guiones
 SEED_LIST_NAME = "Radios lofi"
@@ -74,3 +78,18 @@ def apply_default_radios(music: Dict[str, Any],
         ((r.id, Entry(r.source, r.title, live=True, mime=r.mime, bitrate=r.bitrate))
          for r in radios),
         SEED_LIST_ID, SEED_LIST_NAME)
+
+
+def declined_radios(music: Dict[str, Any],
+                    catalog: Optional[Iterable[DefaultRadio]] = None) -> List[str]:
+    """Los ids de music['seeds'] (saneada con normalize_music) cuya emisora
+    ya no está en ninguna lista: las de serie que el usuario quitó (o que no
+    llegaron a entrar) y las que el catálogo ya no conoce.
+
+    Es la marca que hereda un backup anterior a las radios de serie (con
+    música pero sin 'seeds') al importarlo: así recibe las radios que el
+    usuario conserva y no resucita las que quitó (DataHandler.import_data)."""
+    radios = {r.id: r for r in (DEFAULT_RADIOS if catalog is None else catalog)}
+    present = {station_key(i['source']) for x in music['lists'] for i in x['items']}
+    return [sid for sid in music['seeds']
+            if sid not in radios or station_key(radios[sid].source) not in present]

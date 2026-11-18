@@ -16,7 +16,8 @@ servicio escaneando assets/music/lofi y es de solo lectura.
 Lo que la app trae de serie (las radios de core/radio_catalog.py) entra con
 seed_entries como elementos normales de una lista normal. 'seeds' recuerda
 qué ids se ofrecieron, se añadieran o no: así no se duplican ni vuelve lo
-que el usuario borró.
+que el usuario borró. Una emisora que el usuario ya tenía con la URL escrita
+algo distinta (http, una barra final…) tampoco se duplica: station_key.
 
 Seguridad: las rutas UNC (\\\\servidor\\...) nunca se aceptan (abrirlas
 puede filtrar el hash NTLM de Windows a un servidor ajeno), y una playlist
@@ -574,6 +575,33 @@ def source_key(source: str) -> str:
     return os.path.normcase(os.path.normpath(source))
 
 
+_DEFAULT_PORTS = {'http': 80, 'https': 443}
+
+
+def station_key(source: str) -> str:
+    """Clave laxa para saber si una emisora de serie ya está en la
+    biblioteca (seed_entries): la misma URL con http en vez de https, el
+    host en mayúsculas, el puerto por defecto escrito o una barra final de
+    más es la misma emisora. Solo para la siembra: al añadir a mano manda
+    source_key, que no da por iguales dos URLs que el usuario escribió
+    distintas."""
+    key = source_key(source)
+    if not is_http_url(source):
+        return key
+    try:
+        parts = urlsplit(source.strip())
+        port = parts.port
+    except ValueError:
+        return key
+    host = parts.hostname or ''        # urlsplit ya lo da en minúsculas
+    if ':' in host:
+        host = f"[{host}]"             # IPv6
+    if port is not None and port != _DEFAULT_PORTS.get(parts.scheme.lower()):
+        host = f"{host}:{port}"
+    query = f"?{parts.query}" if parts.query else ''
+    return f"//{host}{parts.path.rstrip('/')}{query}"
+
+
 def item_text_size(item: Dict[str, Any]) -> int:
     """Lo que un item pesa en el JSON a efectos de MAX_*_TEXT."""
     return len(item.get('source') or '') + len(item.get('title') or '')
@@ -873,12 +901,12 @@ def seed_entries(music: Dict[str, Any], seeds: Iterable[Tuple[str, Entry]],
     """Siembra en `music` (ya saneada con normalize_music) las entradas de
     serie (id de catálogo, Entry) cuyo id no está en music['seeds'].
 
-    Cada id se apunta aunque su entrada no se añada (su URL ya estaba en
-    alguna lista, o no cabe en los límites): así nada se duplica ni vuelve
-    después de que el usuario lo borre. Las que entran van a la lista
-    `list_id` (aunque el usuario la haya renombrado) o, si ya no existe, a
-    una nueva con ese id y `list_name` al final de las listas, que nunca se
-    crea vacía. Respeta MAX_LISTS, MAX_ITEMS_PER_LIST, MAX_LIST_TEXT y
+    Cada id se apunta aunque su entrada no se añada (su emisora ya estaba
+    en alguna lista, según station_key, o no cabe en los límites): así nada
+    se duplica ni vuelve después de que el usuario lo borre. Las que entran
+    van a la lista `list_id` (aunque el usuario la haya renombrado) o, si
+    ya no existe, a una nueva con ese id y `list_name` al final de las
+    listas, que nunca se crea vacía. Respeta MAX_LISTS, MAX_ITEMS_PER_LIST, MAX_LIST_TEXT y
     MAX_LIBRARY_TEXT. True si cambió algo (hay que guardar).
     """
     offered = music.setdefault('seeds', [])
@@ -889,7 +917,9 @@ def seed_entries(music: Dict[str, Any], seeds: Iterable[Tuple[str, Entry]],
     if not pending:
         return False
     lists = music['lists']
-    present = {source_key(i['source']) for x in lists for i in x['items']}
+    # La URL que el usuario ya tenía puede diferir en minucias (http, una
+    # barra final…): station_key las da por la misma emisora
+    present = {station_key(i['source']) for x in lists for i in x['items']}
     item_ids = {i['id'] for x in lists for i in x['items']}
     library_text = sum(item_text_size(i) for x in lists for i in x['items'])
     target = next((x for x in lists if x['id'] == list_id), None)
@@ -906,7 +936,7 @@ def seed_entries(music: Dict[str, Any], seeds: Iterable[Tuple[str, Entry]],
                             'bitrate': entry.bitrate}, item_ids)
         if item is None:
             continue
-        key = source_key(item['source'])
+        key = station_key(item['source'])
         if key in present:
             continue
         size = item_text_size(item)
