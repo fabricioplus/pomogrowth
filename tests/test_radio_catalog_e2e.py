@@ -173,3 +173,40 @@ def test_el_dialogo_abre_en_las_radios_de_serie(ctrl_sembrado, emisora, qtbot):
             dlg._overlay.hide()
         dlg.done(0)
         dlg.deleteLater()
+
+
+def test_lo_que_pega_quien_empieza_va_a_la_lista_a_la_vista(ctrl_sembrado, emisora,
+                                                            qtbot, monkeypatch):
+    """El primer arranque de verdad: «Radios lofi» es la única lista propia y
+    el diálogo abre en ella. Lo que se pega (o se suelta) va a la lista a la
+    vista, como en cualquier lista propia, y la interfaz lo dice antes y
+    después. Sin listas propias (con la siembra apagada, o tras borrar
+    «Radios lofi») va a «Mis enlaces»: ver tests/test_music_ui.py::
+    test_en_la_lofi_se_puede_pegar_un_enlace_y_ctrl_v_lo_anade."""
+    from ui.dialogs import music_dialog
+    from ui.dialogs.music_dialog import MusicDialog
+    ctrl = ctrl_sembrado
+    dlg = MusicDialog(ctrl.window, ctrl.music)
+    dlg.show()
+    try:
+        assert dlg._list_id == rc.SEED_LIST_ID
+        assert dlg._drop_target_text() == f"Suelta para añadir a «{rc.SEED_LIST_NAME}»"
+        dlg.link_edit.setText(f"{emisora.base}/live?mia=1")
+        with qtbot.waitSignal(ctrl.music.link_resolved, timeout=WAIT) as blk:
+            qtbot.keyClick(dlg.link_edit, Qt.Key_Return)
+        assert blk.args == [rc.SEED_LIST_ID, 1, '']
+        assert dlg._list_id == rc.SEED_LIST_ID and dlg.items_view.count() == 3
+        assert f"a «{rc.SEED_LIST_NAME}»" in dlg.status_label.text()
+        # Borrarla para quitarse las de serie avisa de todo lo que se lleva
+        asked = []
+        monkeypatch.setattr(music_dialog.dialogs, "confirm",
+                            lambda _parent, _title, message, **_k: asked.append(message))
+        dlg._delete_list(rc.SEED_LIST_ID)
+        assert asked == [f"Se quitará «{rc.SEED_LIST_NAME}» y sus 3 elementos. "
+                         "Los archivos de tu equipo no se borran."]
+        assert ctrl.music.items(rc.SEED_LIST_ID)        # canceló: sigue ahí
+    finally:
+        if dlg._overlay:
+            dlg._overlay.hide()
+        dlg.done(0)
+        dlg.deleteLater()
