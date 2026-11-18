@@ -19,6 +19,12 @@ Notas:
   PomoGrowth. Con «Solo durante el enfoque» suena solo mientras haya un
   pomodoro en marcha.
 
+Radios de serie: en Música ya tienes la lista «Radios lofi», con tres radios
+lofi gratuitas en directo (24/7 Lofi Radio, de Londres; bigFM LoFi Focus, de
+Alemania, y NIA Radio LoFi, de Numea). Solo se conectan a Internet cuando
+las reproduces. Puedes quitarlas, renombrarlas o borrar la lista como
+cualquier otra: las que quites no vuelven a aparecer.
+
 Además de esta carpeta, en Música puedes crear tus propias listas con:
 - radios en directo (el enlace directo del stream, p. ej. .../stream.mp3, o
   su lista .pls/.m3u),

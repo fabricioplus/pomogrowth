@@ -14,7 +14,10 @@ Ninguno sale a internet: la guarda de red (tests/fakes/net.py, GuardaDeRed)
 bloquea toda petición real fuera de loopback (127.0.0.1, localhost, ::1) por
 requests (Session.request/send: también requests.delete y compañía), urllib
 y httpx, y hace fallar el test que la intentó. Para simular Asana, ClickUp,
-n8n… se usa el fixture `fake_net`.
+n8n… se usa el fixture `fake_net`. La guarda no ve a FFmpeg (el reproductor
+de música), así que ningún DataHandler de los tests siembra las radios de
+serie, que apuntan a internet: los tests de tests/test_radio_catalog*.py
+las encienden con un catálogo de URLs de 127.0.0.1.
 """
 import sys
 from pathlib import Path
@@ -83,6 +86,15 @@ def _hosts_de_prueba(tmp_path, monkeypatch):
 def _sin_pregunta_de_esfuerzo(monkeypatch):
     from ui.controllers.app_controller import AppController
     monkeypatch.setattr(AppController, "ASK_EFFORT_DEFAULT", False)
+
+
+# Radios de serie apagadas en toda la suite: apuntan a internet y FFmpeg se
+# conectaría sin pasar por la guarda de red (p. ej. un test que pulsa
+# reproducir en el diálogo, que abre en la primera lista del usuario)
+@pytest.fixture(autouse=True)
+def _sin_radios_de_serie(monkeypatch):
+    from core.data_handler import DataHandler
+    monkeypatch.setattr(DataHandler, "SEED_DEFAULT_RADIOS", False)
 
 
 # Sonidos del temporizador: el botón «Probar» de Ajustes tampoco suena (los

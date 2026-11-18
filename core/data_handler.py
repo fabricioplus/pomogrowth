@@ -97,12 +97,18 @@ except ImportError:
 from core.asana_errors import AsanaFetchError, error_from_response
 from core.config import Config
 from core.music_library import default_music, normalize_music
+from core.radio_catalog import apply_default_radios
 from core.ambient_catalog import normalize_mix as normalize_ambient_mix
 from core.ambient_catalog import clamp_volume
 from utils.safe_json import load_json_safe, save_json_atomic
 
 
 class DataHandler:
+    # Radios lofi de serie (core/radio_catalog.py): se siembran al cargar. Los
+    # tests lo apagan (tests/conftest.py): la guarda de red no ve a FFmpeg y
+    # una radio de serie que sonara en un test saldría a internet
+    SEED_DEFAULT_RADIOS = True
+
     def __init__(self, filepath: Path):
         self.filepath = filepath
         self.load_error: Optional[str] = None
@@ -145,6 +151,9 @@ class DataHandler:
         if not self.filepath.exists():
             # Instalación nueva: la presentación del primer arranque, pendiente
             default_data['settings']['onboarding_seen'] = False
+            # …y las radios de serie. Sin guardar: el primer guardado las
+            # persiste y, hasta entonces, cada arranque las siembra igual
+            self._seed_default_radios(default_data['music'])
             return default_data
         # Carga segura: si el archivo está corrupto se preserva una copia y se
         # intenta el .bak; el error queda en self.load_error para avisar en UI.
@@ -265,6 +274,12 @@ class DataHandler:
             data['settings']['ambient'] = normalize_ambient_mix(
                 data['settings'].get('ambient'))
             Config.N8N_WEBHOOK_URL = data.get('settings', {}).get('n8n_webhook_url', '')
+            # Radios de serie que aún no se le ofrecieron (también a quien
+            # actualiza): al final de todo, con el archivo ya validado, para
+            # que una siembra nunca acompañe a un load_error. Se guarda al
+            # arrancar (__init__) o al acabar import_data
+            if self._seed_default_radios(data['music']):
+                self._migrated_on_load = True
             return data
         except (AttributeError, TypeError, KeyError, ValueError, OverflowError) as e:
             # Estructura interna inesperada (p. ej. 'settings' no es dict, o
@@ -946,15 +961,20 @@ class DataHandler:
                 outbox.append({**op, 'send_tries': max(1, op.get('send_tries') or 0)})
         imported['asana_outbox'] = outbox
         # La biblioteca de música no viaja en los backups viejos: sin una
-        # válida en el archivo, se conserva la actual
+        # válida en el archivo, se conserva la actual (con su marca de las
+        # radios de serie ya ofrecidas)
         if not self._has_valid_music(imported.get('music')):
             imported['music'] = copy.deepcopy(self.data.get('music') or default_music())
         self.data = imported
         self._save()
-        # Releer con los setdefault/validaciones de _load
+        # Releer con los setdefault/validaciones de _load. Un backup con
+        # música pero sin marca de semillas (anterior a las radios de serie)
+        # las recibe ahí; uno con marca se respeta tal cual
+        self._migrated_on_load = False
         self.data = self._load()
+        migrated = self._migrated_on_load
         # Las altas pendientes de tareas que no están en el backup no se crean
-        if self._drop_asana_creates_without_task():
+        if self._drop_asana_creates_without_task() or migrated:
             self._save()
 
     def _delete_asana_task_in_thread(self, task_gid: str):
@@ -1466,6 +1486,18 @@ class DataHandler:
     def _has_valid_music(music: Any) -> bool:
         """¿Trae un backup una biblioteca de música aprovechable?"""
         return isinstance(music, dict) and isinstance(music.get('lists'), list)
+
+    def _seed_default_radios(self, music: Dict[str, Any]) -> bool:
+        """Siembra en `music` (saneada) las radios de serie que nunca se le
+        ofrecieron (core/radio_catalog.py). True si cambió algo. Un fallo
+        aquí nunca impide cargar los datos: se avisa y se sigue sin ellas."""
+        if not self.SEED_DEFAULT_RADIOS:
+            return False
+        try:
+            return apply_default_radios(music)
+        except Exception as e:
+            print(f"Advertencia: no se pudieron añadir las radios de serie: {e}")
+            return False
 
     def get_music(self) -> Dict[str, Any]:
         """Copia validada de la biblioteca de música (con valores por defecto)."""

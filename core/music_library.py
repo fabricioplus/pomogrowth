@@ -4,13 +4,19 @@ Formato persistido en data['music'] (DataHandler.get_music / save_music):
     {'lists': [{'id', 'name', 'items': [Item, ...]}],
      'current': {'list': str|None, 'item': str|None},   # lo último que sonó
      'volume': 0..1, 'shuffle': bool, 'repeat': 'all'|'one'|'off',
-     'focus_only': bool}
+     'focus_only': bool,
+     'seeds': [str, ...]}   # ids de lo que la app ya ofreció de serie
     Item = {'id', 'kind': 'file'|'url', 'source': ruta absoluta o URL http(s),
             'title', 'live': bool|None (None = aún no se sabe),
             'mime': '' si no se sabe, 'bitrate': kbps (0 si no se sabe)}
 
 La lista virtual LOFI_LIST_ID ('lofi') no se guarda aquí: la genera el
 servicio escaneando assets/music/lofi y es de solo lectura.
+
+Lo que la app trae de serie (las radios de core/radio_catalog.py) entra con
+seed_entries como elementos normales de una lista normal. 'seeds' recuerda
+qué ids se ofrecieron, se añadieran o no: así no se duplican ni vuelve lo
+que el usuario borró.
 
 Seguridad: las rutas UNC (\\\\servidor\\...) nunca se aceptan (abrirlas
 puede filtrar el hash NTLM de Windows a un servidor ajeno), y una playlist
@@ -26,7 +32,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote, urljoin, urlsplit
 from urllib.request import url2pathname
 
@@ -48,6 +54,10 @@ MAX_PLAYLIST_ENTRIES = 2000
 MAX_LIST_TEXT = 512 * 1024
 MAX_LIBRARY_TEXT = 4 * 1024 * 1024
 _MAX_ID = 64
+# Ids de serie que se recuerdan: de sobra para el catálogo (lo comprueba
+# tests/test_radio_catalog.py). Con la marca llena no se siembra nada más,
+# porque lo que no se pudiera recordar volvería tras borrarlo
+MAX_SEEDS = 256
 
 # Tipo MIME por extensión (para el códec mostrado y los items locales)
 EXT_MIME = {
@@ -546,7 +556,7 @@ def playlist_name(text: str, fmt: Optional[str]) -> str:
 def default_music() -> Dict[str, Any]:
     return {'lists': [], 'current': {'list': None, 'item': None},
             'volume': DEFAULT_VOLUME, 'shuffle': False, 'repeat': 'all',
-            'focus_only': False}
+            'focus_only': False, 'seeds': []}
 
 
 def _new_id(used: set) -> str:
@@ -659,6 +669,12 @@ def normalize_music(raw: Any) -> Dict[str, Any]:
         out['repeat'] = raw['repeat']
     if isinstance(raw.get('focus_only'), bool):
         out['focus_only'] = raw['focus_only']
+    # La marca de lo ofrecido de serie: sin ella en el esquema se perdería en
+    # el primer guardado y lo borrado volvería al abrir
+    seeds = raw.get('seeds')
+    if isinstance(seeds, list):
+        out['seeds'] = list(dict.fromkeys(
+            x for x in seeds if isinstance(x, str) and 0 < len(x) <= _MAX_ID))[:MAX_SEEDS]
     cur = raw.get('current')
     if isinstance(cur, dict):
         c_list, c_item = cur.get('list'), cur.get('item')
@@ -849,6 +865,65 @@ def update_item_fields(item: Dict[str, Any], **fields) -> bool:
         if item.get(key) != value:
             item[key] = value
             changed = True
+    return changed
+
+
+def seed_entries(music: Dict[str, Any], seeds: Iterable[Tuple[str, Entry]],
+                 list_id: str, list_name: str) -> bool:
+    """Siembra en `music` (ya saneada con normalize_music) las entradas de
+    serie (id de catálogo, Entry) cuyo id no está en music['seeds'].
+
+    Cada id se apunta aunque su entrada no se añada (su URL ya estaba en
+    alguna lista, o no cabe en los límites): así nada se duplica ni vuelve
+    después de que el usuario lo borre. Las que entran van a la lista
+    `list_id` (aunque el usuario la haya renombrado) o, si ya no existe, a
+    una nueva con ese id y `list_name` al final de las listas, que nunca se
+    crea vacía. Respeta MAX_LISTS, MAX_ITEMS_PER_LIST, MAX_LIST_TEXT y
+    MAX_LIBRARY_TEXT. True si cambió algo (hay que guardar).
+    """
+    offered = music.setdefault('seeds', [])
+    # Un id que normalize_music no conservaría tampoco se siembra: volvería
+    # en cada arranque
+    pending = [(sid, entry) for sid, entry in seeds
+               if isinstance(sid, str) and 0 < len(sid) <= _MAX_ID and sid not in offered]
+    if not pending:
+        return False
+    lists = music['lists']
+    present = {source_key(i['source']) for x in lists for i in x['items']}
+    item_ids = {i['id'] for x in lists for i in x['items']}
+    library_text = sum(item_text_size(i) for x in lists for i in x['items'])
+    target = next((x for x in lists if x['id'] == list_id), None)
+    changed = False
+    for sid, entry in pending:
+        if sid in offered:
+            continue   # repetido en el propio catálogo
+        if len(offered) >= MAX_SEEDS:
+            break      # lo que no se puede recordar no se siembra
+        offered.append(sid)
+        changed = True
+        item = _valid_item({'source': entry.source, 'title': entry.title,
+                            'live': entry.live, 'mime': entry.mime,
+                            'bitrate': entry.bitrate}, item_ids)
+        if item is None:
+            continue
+        key = source_key(item['source'])
+        if key in present:
+            continue
+        size = item_text_size(item)
+        if library_text + size > MAX_LIBRARY_TEXT:
+            continue
+        if target is None:
+            if len(lists) >= MAX_LISTS:
+                continue
+            target = {'id': list_id, 'name': clean_text(list_name, MAX_LIST_NAME),
+                      'items': []}
+            lists.append(target)
+        elif (len(target['items']) >= MAX_ITEMS_PER_LIST
+              or sum(item_text_size(i) for i in target['items']) + size > MAX_LIST_TEXT):
+            continue
+        target['items'].append(item)
+        library_text += size
+        present.add(key)
     return changed
 
 
