@@ -353,8 +353,10 @@ def test_geometria_estrecha_de_antes_se_ensancha(qtbot):
 
 # ------------------------------------------------------------------ revisión
 def test_en_la_lofi_se_puede_pegar_un_enlace_y_ctrl_v_lo_anade(ctrl, server, qtbot):
-    """Primera vez: solo existe la lofi. Pegar (o Ctrl+V fuera del campo) crea
-    la lista, como al soltar el enlace."""
+    """Sin listas propias (la suite apaga las radios de serie; en la app, tras
+    borrar «Radios lofi»): solo existe la lofi. Pegar (o Ctrl+V fuera del
+    campo) crea la lista, como al soltar el enlace. El primer arranque de
+    verdad, con las radios de serie, está en tests/test_radio_catalog_e2e.py."""
     from PySide6.QtGui import QGuiApplication
     dlg = _open(ctrl)
     assert dlg._list_id == 'lofi' and dlg.composer_row.isVisibleTo(dlg)
