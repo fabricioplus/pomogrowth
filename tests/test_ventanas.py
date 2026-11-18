@@ -350,14 +350,11 @@ def test_win_native_inofensivo_sin_ventanas_nativas(ctrl):
     assert win_native.is_topmost(0) is None
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="WS_EX_TOPMOST es de Windows")
-def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
-    """Una ventana Win32 real, oculta y sin activar (nada se ve): poner y
-    quitar el «encima de todo» y reponerlo con su línea en el log."""
+def _user32():
+    """user32 con los prototipos de los tests Win32 de verdad (ventanas
+    STATIC ocultas: nunca se muestran ni se activan)."""
     import ctypes
     from ctypes import wintypes
-    from utils import win_native
-    monkeypatch.setattr(win_native, "_native_windows", lambda: True)
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     user32.CreateWindowExW.restype = wintypes.HWND
     user32.CreateWindowExW.argtypes = (
@@ -366,22 +363,105 @@ def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
         wintypes.HINSTANCE, wintypes.LPVOID)
     user32.DestroyWindow.argtypes = (wintypes.HWND,)
     user32.IsWindowVisible.argtypes = (wintypes.HWND,)
-    hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth prueba", 0, 0, 0, 10, 10,
+    user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
+    return user32
+
+
+def _window_rect(user32, hwnd):
+    import ctypes
+    from ctypes import wintypes
+    r = wintypes.RECT()
+    user32.GetWindowRect(hwnd, ctypes.byref(r))
+    return (r.left, r.top, r.right, r.bottom)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="WS_EX_TOPMOST es de Windows")
+def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
+    """Una ventana Win32 real, oculta y sin activar (nada se ve), fuera del
+    (0, 0): poner y quitar el «encima de todo» sin moverla ni
+    redimensionarla, y reponerlo con su línea en el log (y sin ella si no lo
+    había perdido, aunque se fuerce)."""
+    from utils import win_native
+    monkeypatch.setattr(win_native, "_native_windows", lambda: True)
+    user32 = _user32()
+    hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth prueba", 0, 50, 60, 10, 10,
                                   None, None, None, None)
     assert hwnd
     try:
+        rect = _window_rect(user32, hwnd)
+        assert rect[:2] == (50, 60)
         assert win_native.is_topmost(hwnd) is False
         assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
+        assert _window_rect(user32, hwnd) == rect    # ni movida ni redimensionada
         assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
         with caplog.at_level(logging.INFO):
             assert win_native.keep_topmost(hwnd, "prueba") is True
             assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
+            # Forzado (fade_show, la compacta al mostrarse, «Guardar») sobre una
+            # que no lo perdió: ni una línea, o el log no distinguiría una pérdida
+            assert win_native.keep_topmost(hwnd, "prueba", force=True) is False
         assert win_native.is_topmost(hwnd) is True
         assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        assert _window_rect(user32, hwnd) == rect
         assert not user32.IsWindowVisible(hwnd)    # nunca se mostró
     finally:
         user32.DestroyWindow(hwnd)
     assert win_native.is_topmost(hwnd) is None     # ya no es una ventana
+
+
+def test_las_banderas_de_set_topmost():
+    """Solo la banda: sin mover, sin redimensionar y SIN ACTIVAR (el tick lo
+    repone cada 2 s: activarla le robaría el foco a la app del usuario cada
+    vez). Y sin SWP_NOOWNERZORDER: ver el test siguiente."""
+    from utils import win_native
+    assert win_native._TOPMOST_SWP == (win_native.SWP_NOMOVE | win_native.SWP_NOSIZE
+                                       | win_native.SWP_NOACTIVATE)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="El orden z es de Windows")
+def test_reponer_el_encima_de_todo_deja_sus_modales_encima(monkeypatch):
+    """Una ventana dueña y otra que posee (como la principal y su modal),
+    Win32 reales y ocultas. Reponer el «encima de todo» de la dueña (fade_show,
+    salir de minimizada, el tick) no puede dejarla encima de su modal: con
+    SWP_NOOWNERZORDER pasaba, y la ventana quedaba bloqueada por un modal
+    escondido detrás de ella."""
+    from utils import win_native
+    monkeypatch.setattr(win_native, "_native_windows", lambda: True)
+    user32 = _user32()
+    GW_HWNDPREV = 3
+    WS_POPUP, WS_EX_TOPMOST, WS_EX_NOACTIVATE = 0x80000000, 0x8, 0x08000000
+
+    def make(owner=None):
+        h = user32.CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE, "STATIC",
+                                   "PomoGrowth prueba", WS_POPUP, -30000, -30000, 1, 1,
+                                   owner, None, None, None)
+        assert h
+        return h
+
+    def above(a, b) -> bool:
+        h = user32.GetWindow(b, GW_HWNDPREV)
+        for _ in range(100000):
+            if not h:
+                return False
+            if h == a:
+                return True
+            h = user32.GetWindow(h, GW_HWNDPREV)
+        return False
+
+    owner = make()
+    owned = make(owner)
+    try:
+        assert above(owned, owner)
+        assert win_native.keep_topmost(owner, "prueba", force=True) is False
+        assert above(owned, owner)                 # forzado: el modal sigue encima
+        assert win_native.set_topmost(owner, False) and win_native.set_topmost(owner, True)
+        assert above(owned, owner)
+        assert not user32.IsWindowVisible(owner) and not user32.IsWindowVisible(owned)
+    finally:
+        user32.DestroyWindow(owned)
+        user32.DestroyWindow(owner)
 
 
 # ---------- 6. Segunda instancia ----------

@@ -6,9 +6,12 @@ el «encima de todo» nativo (WS_EX_TOPMOST) de las ventanas siempre visibles.
 WindowStaysOnTopHint, pero no vuelve a mirarlo. Si Windows u otra app se lo
 quita, la ventana sigue creyéndose siempre visible y ya no lo es.
 is_topmost() lo lee del HWND y set_topmost() lo repone sin activar, mover ni
-redimensionar la ventana y sin reordenar las que posee. keep_topmost() junta
-las dos y deja una línea en el log cada vez que hubo que reponerlo. Fuera de
-Windows o sin ventanas nativas (Qt offscreen en los tests) no hacen nada.
+redimensionar la ventana. Las ventanas que posee (sus diálogos y avisos) van
+con ella y siguen encima: con SWP_NOOWNERZORDER la dueña subía por encima de
+su propio modal y quedaba bloqueada con el modal escondido detrás.
+keep_topmost() junta las dos y deja una línea en el log cada vez que hubo
+que reponerlo. Fuera de Windows o sin ventanas nativas (Qt offscreen en los
+tests) no hacen nada.
 """
 import ctypes
 import logging
@@ -25,9 +28,10 @@ WS_EX_TOPMOST = 0x00000008
 HWND_TOPMOST, HWND_NOTOPMOST = -1, -2
 SWP_NOSIZE, SWP_NOMOVE = 0x0001, 0x0002
 SWP_NOACTIVATE, SWP_NOOWNERZORDER = 0x0010, 0x0200
-# Solo la banda (topmost o no): ni mover, ni redimensionar, ni activar, ni
-# arrastrar a las ventanas que posee (diálogos, avisos)
-_TOPMOST_SWP = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER
+# Solo la banda (topmost o no): ni mover, ni redimensionar, ni activar. Sin
+# SWP_NOOWNERZORDER: Windows sube con la ventana a las que posee (diálogos,
+# avisos) y las deja encima de ella, que es donde un modal tiene que estar
+_TOPMOST_SWP = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
 ASFW_ANY = 0xFFFFFFFF
 _user32 = None  # WinDLL propia con los prototipos de abajo (ver _native_user32)
 
@@ -131,8 +135,9 @@ def is_topmost(hwnd) -> Optional[bool]:
 
 def set_topmost(hwnd, on: bool) -> bool:
     """Pone (HWND_TOPMOST) o quita (HWND_NOTOPMOST) el «encima de todo» sin
-    activar, mover ni redimensionar la ventana. True si Windows lo aceptó;
-    inofensivo (False) si no aplica."""
+    activar, mover ni redimensionar la ventana; las que posee van con ella y
+    siguen encima (un modal no queda detrás de su ventana). True si Windows
+    lo aceptó; inofensivo (False) si no aplica."""
     lib = _native_user32()
     if lib is None or not hwnd:
         return False
