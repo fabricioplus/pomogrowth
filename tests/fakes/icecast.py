@@ -19,13 +19,23 @@ nuevas y kill=True corta además las abiertas):
 - 'normal': 200 con icy-name/icy-br/icy-genre, una ráfaga inicial (burst
   bytes) y luego a tiempo real (byterate). Con «Icy-MetaData: 1», icy-metaint
   y, cada metaint bytes, un bloque «StreamTitle='Artista N - Tema N';» (N
-  cambia cada title_every bloques; los de en medio van vacíos, L = 0).
-- 'reject401', 'reject403', 'reject429': ese estado con una página HTML.
+  cambia cada title_every bloques; los de en medio van vacíos, L = 0). Con
+  el ajuste metaint_header, la cabecera icy-metaint lleva ese texto (uno que
+  no vale: 'abc', '0'…) aunque los bloques sigan yendo cada metaint bytes.
+- 'noicy': como 'normal' pero sin ninguna cabecera icy-* ni metadatos (un
+  directo servido por nginx o un CDN).
+- 'reject401', 'reject403', 'reject429'… (cualquier rejectNNN): ese estado
+  con una página HTML.
 - 'html200': 200 text/html, la página de «cuenta en pausa».
+- 'html_as_audio', 'hls_as_audio': 200 audio/mpeg con Content-Length y, de
+  cuerpo, esa página o una lista HLS (solo el contenido dice lo que es).
 - 'accept_close': lee la petición y cierra sin contestar.
 - 'down404': 404 con HTML (un Icecast sin fuente).
 - 'silent': como 'normal' hasta la ráfaga y luego se calla sin cerrar; las
   conexiones abiertas también se callan y siguen al volver a 'normal'.
+- 'deaf': como 'normal' hasta la ráfaga y luego ni manda ni mira el socket:
+  no se entera de que el cliente cerró ni cierra su lado (en Windows, el
+  hilo que lee de ella sigue bloqueado aunque se corte su conexión).
 - 'cut': cada conexión emite cut_after_s segundos y cierra limpio (también
   vale para el corte: Hub.cut() corta de golpe las abiertas).
 - 'track': una pista de track_s segundos con Content-Length y Accept-Ranges
@@ -37,13 +47,21 @@ Formatos (Hub.formats): el de cada conexión de audio sale de esa lista en
 orden y el último se repite: 'mp3' (MPEG-1 capa III, 320 kbps, 44,1 kHz),
 'aac' (ADTS AAC-LC 44,1 kHz estéreo) y 'aac22' (ADTS AAC-LC 22,05 kHz). Las
 tramas son de silencio (las de AAC solo sirven para mirar sus cabeceras).
+
+start(tls=ruta) sirve por https con ese certificado (tls_cert(): uno de
+prueba que certifi no valida, como el de un antivirus que inspecciona
+HTTPS). La negociación TLS se hace al aceptar: una que el cliente aborta no
+llega a ser una petición y no se registra.
 """
 import select
 import socket
+import ssl
+import sysconfig
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 KEY = "clave-de-prueba"
@@ -74,16 +92,31 @@ HTML_PAUSED = (b"<!DOCTYPE html><html><head><title>Access paused</title></head><
                b"<p>One stream at a time.</p></body></html>")
 HTML_404 = (b"<html><head><title>Error 404</title></head><body><b>404 - The file you "
             b"requested could not be found</b></body></html>")
+HLS_LIST = b"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg1.aac\n"
 _PUBLIC = ('id', 'host', 'path', 'key', 'ua', 'icy', 'range', 't_open', 't_close',
            'status', 'bytes', 'end', 'format')
 
 
+def tls_cert() -> Optional[str]:
+    """Certificado de prueba con su clave (el que trae CPython en Lib/test,
+    para «localhost»): certifi no lo valida. None si esta instalación de
+    Python no trae la suite de tests."""
+    stdlib = Path(sysconfig.get_paths()['stdlib'])
+    for rel in ('test/certdata/keycert.pem', 'test/keycert.pem'):
+        if (stdlib / rel).is_file():
+            return str(stdlib / rel)
+    return None
+
+
 def peer_gone(sock: Any) -> bool:
     """¿Cerró el cliente? Sin esperar: tras la petición, lo único que puede
-    mandar es el cierre (FIN o RST)."""
+    mandar es el cierre (FIN o RST; con TLS, que no deja mirar sin leer, su
+    aviso de cierre)."""
     try:
         readable, _w, _x = select.select([sock], [], [], 0)
-        return bool(readable) and sock.recv(1, socket.MSG_PEEK) == b''
+        if not readable:
+            return False
+        return isinstance(sock, ssl.SSLSocket) or sock.recv(1, socket.MSG_PEEK) == b''
     except (OSError, ValueError):
         return True
 
@@ -97,6 +130,8 @@ class Hub:
         self.t0 = time.monotonic()
         self.burst, self.byterate, self.metaint = burst, byterate, metaint
         self.title_every, self.cut_after_s, self.track_s = title_every, cut_after_s, track_s
+        self.metaint_header: Optional[str] = None   # icy-metaint que se anuncia (None = metaint)
+        self.scheme = 'http'
         self.mode = 'normal'
         self.formats: List[str] = ['mp3']
         self.records: List[Dict[str, Any]] = []
@@ -113,11 +148,12 @@ class Hub:
         return time.monotonic() - self.t0
 
     def url(self, host: str = 'prem2', key: str = KEY, channel: str = 'lofi') -> str:
-        return f"http://127.0.0.1:{self.servers[host].server_address[1]}/{channel}_hi?{key}"
+        port = self.servers[host].server_address[1]
+        return f"{self.scheme}://127.0.0.1:{port}/{channel}_hi?{key}"
 
     def pls_url(self, key: str = KEY, channel: str = 'lofi') -> str:
         port = self.servers['listen'].server_address[1]
-        return f"http://127.0.0.1:{port}/premium_high/{channel}.pls?listen_key={key}"
+        return f"{self.scheme}://127.0.0.1:{port}/premium_high/{channel}.pls?listen_key={key}"
 
     def set_mode(self, mode: str, kill: bool = False, **settings: Any) -> None:
         with self.lock:
@@ -252,6 +288,9 @@ class Handler(BaseHTTPRequestHandler):
         elif mode == 'html200':
             rec['status'] = 200
             self._send(200, HTML_PAUSED, "text/html; charset=utf-8")
+        elif mode in ('html_as_audio', 'hls_as_audio'):
+            rec['status'] = 200
+            self._send(200, HTML_PAUSED if mode == 'html_as_audio' else HLS_LIST, "audio/mpeg")
         elif mode == 'down404':
             rec['status'] = 404
             self._send(404, HTML_404, "text/html")
@@ -283,17 +322,19 @@ class Handler(BaseHTTPRequestHandler):
     def _stream(self, hub: Hub, rec: Dict[str, Any], cut_after=None) -> None:
         fmt = rec['format'] = hub._next_format()
         ctype, frame = FORMATS[fmt]
-        icy = self.headers.get("Icy-MetaData") == "1"
+        plain = hub.mode == 'noicy'
+        icy = self.headers.get("Icy-MetaData") == "1" and not plain
         rec['status'] = 200
         self.send_response(200)
         self.send_header("Content-Type", ctype)
-        self.send_header("icy-name", STATION)
-        self.send_header("icy-genre", "Lofi")
-        self.send_header("icy-br", "320")
-        self.send_header("icy-pub", "0")
+        if not plain:
+            self.send_header("icy-name", STATION)
+            self.send_header("icy-genre", "Lofi")
+            self.send_header("icy-br", "320")
+            self.send_header("icy-pub", "0")
         self.send_header("Cache-Control", "no-cache, no-store")
         if icy:
-            self.send_header("icy-metaint", str(hub.metaint))
+            self.send_header("icy-metaint", hub.metaint_header or str(hub.metaint))
         self.end_headers()
         source = frame * max(1, 65536 // len(frame))
         start = time.monotonic()
@@ -301,6 +342,11 @@ class Handler(BaseHTTPRequestHandler):
         silent_from = None
         sent = since_meta = blocks = pos = 0
         while True:
+            if hub.mode == 'deaf' and sent >= hub.burst:
+                # Ni manda ni mira el socket: no ve el cierre del cliente
+                while not (rec['kill'].is_set() or hub.stopping.is_set()):
+                    rec['kill'].wait(0.05)
+                return
             if rec['kill'].is_set() or hub.stopping.is_set() or self._gone():
                 return
             now = time.monotonic()
@@ -392,11 +438,19 @@ class _Server(ThreadingHTTPServer):
         pass
 
 
-def start(**settings: Any) -> Hub:
-    """Arranca los cuatro hosts (puertos efímeros) con un Hub común."""
+def start(tls: Optional[str] = None, **settings: Any) -> Hub:
+    """Arranca los cuatro hosts (puertos efímeros) con un Hub común; con tls
+    (certificado y clave en un .pem), por https."""
     hub = Hub(**settings)
+    context = None
+    if tls:
+        hub.scheme = 'https'
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(tls)
     for name in ('listen', 'prem1', 'prem2', 'prem4'):
         srv = _Server(("127.0.0.1", 0), Handler)
+        if context is not None:
+            srv.socket = context.wrap_socket(srv.socket, server_side=True)
         srv.hub = hub
         srv.name = name
         hub.servers[name] = srv

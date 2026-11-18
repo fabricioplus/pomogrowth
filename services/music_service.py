@@ -35,7 +35,11 @@ Contrato con la interfaz (resumen; detalle en cada método):
   deciden sus cabeceras: una pista (Content-Length o Accept-Ranges sin
   icy-*) va directa por 302 y se guarda live False. Si el proxy no puede
   abrir, o el intento anterior por él falló por la red sin llegar a sonar,
-  se conecta directo.
+  se conecta directo; si no puede validar el certificado de una emisora
+  https (un antivirus que inspecciona HTTPS…) o falla el proxy del sistema,
+  redirige y el reproductor conecta directo en ese mismo intento (sin
+  títulos). Un corte que el proxy le pasa al reproductor llega como error,
+  no como fin: una radio sin icy-* no se confunde con una pista que acabó.
 - Rechazo: con 401/402/403/407/429/451, o una página web donde iba el
   audio, el proxy hace una sola petición y avisa (rejected): se para a la
   primera, sin reintentar ni saltar al siguiente espejo, con un mensaje que
@@ -1418,8 +1422,9 @@ class MusicService(QObject):
         self.now_playing_changed.emit()
 
     def _on_buffer_bypassed(self, sid: int) -> None:
-        """El proxy redirigió (una pista, HLS, «ICY 200 OK»): el reproductor
-        sigue la redirección y conecta directo."""
+        """El proxy redirigió (una pista, HLS, «ICY 200 OK», un certificado o
+        un proxy del sistema que solo le fallan a él): el reproductor sigue la
+        redirección y conecta directo."""
         if sid != self._proxy_sid or not self._proxied:
             return
         self._proxied = False

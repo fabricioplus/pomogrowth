@@ -14,7 +14,11 @@ I1 nunca dos conexiones a la vez · I2 los títulos salen de la misma conexión
 conexión (una pista, directa por 302 tras cerrar) · I4 un rechazo, una sola
 petición y parar · I5 otros errores, 502 (sin 302) · I6 reconexiones
 espaciadas y con tope · I7 sin empalmar formatos distintos · I8 pausa,
-parar, cambiar y cerrar dejan 0 conexiones y un solo User-Agent.
+parar, cambiar y cerrar dejan 0 conexiones y un solo User-Agent · I9 nada
+espera al hilo lector en el hilo de la interfaz. Y lo que el proxy no debe
+cambiar respecto a ir directo: un corte llega a FFmpeg como corte (no como
+el fin de una pista) y una emisora https que solo el proxy no puede validar
+suena igual, directa.
 """
 import importlib.util
 import os
@@ -38,7 +42,7 @@ from core.music_library import Entry  # noqa: E402
 from services import music_service, workers  # noqa: E402
 from services.audio_format import find_signature  # noqa: E402
 from services.music_service import MusicService  # noqa: E402
-from services.stream_buffer import StreamBuffer  # noqa: E402
+from services.stream_buffer import ConnectionBudget, StreamBuffer  # noqa: E402
 from tests.fakes import icecast  # noqa: E402
 from tests.fakes.icecast import STATION  # noqa: E402
 
@@ -49,6 +53,17 @@ UA = "Lavf/61.7.100"    # el User-Agent con el que pide FFmpeg
 @pytest.fixture
 def emisora():
     hub = icecast.start()
+    yield hub
+    hub.close()
+
+
+@pytest.fixture
+def emisora_tls():
+    """La misma emisora por https, con un certificado que certifi no valida."""
+    cert = icecast.tls_cert()
+    if cert is None:
+        pytest.skip("este Python no trae los certificados de prueba de Lib/test")
+    hub = icecast.start(tls=cert)
     yield hub
     hub.close()
 
@@ -70,7 +85,8 @@ def proxy(qtbot):
 class _Reproductor:
     """Lee la URL local en un hilo, como FFmpeg (con su User-Agent y
     pidiendo metadatos ICY, que el proxy no le da). `finished`: llegó la
-    parte final del cuerpo (el audio acabó entero, no se cortó)."""
+    parte final del cuerpo (el audio acabó entero); `truncated`: se cerró a
+    mitad de una parte (un corte)."""
 
     def __init__(self, url: str):
         parts = urlsplit(url)
@@ -139,6 +155,13 @@ class _Reproductor:
                 del self._pending[:end + 2]
                 self.finished = size == 0
                 self._left = size
+
+    @property
+    def truncated(self) -> bool:
+        """¿Se cerró a mitad de una parte? Así distingue FFmpeg un corte (un
+        error: «Stream ends prematurely») del fin: si la conexión se cierra
+        justo tras una parte entera, lo lee como el fin del archivo."""
+        return self.closed and self._chunked and not self.finished and self._left > 0
 
     def _add(self, data: bytes) -> None:
         if data:
@@ -221,13 +244,18 @@ def test_una_pista_va_directa_por_302_tras_cerrar_la_conexion(qtbot, emisora, pr
 
 @pytest.mark.parametrize("mode, status, answered", [
     ('reject403', 403, 403), ('reject401', 401, 401), ('reject429', 429, 429),
-    ('html200', 200, 502)])
+    ('reject402', 402, 402), ('reject407', 407, 407), ('reject451', 451, 451),
+    ('html200', 200, 502), ('html_as_audio', 200, 502)])
 def test_un_rechazo_es_una_sola_peticion_sin_302(qtbot, emisora, proxy, mode, status, answered):
     """I4: el proxy no reintenta ni redirige (el 302 hacía a FFmpeg repetir
-    la petición): avisa con rejected y contesta el error."""
+    la petición): avisa con rejected y contesta el error. También con la
+    página servida como audio/mpeg y con su tamaño: de vida desconocida,
+    sus cabeceras son las de una pista, pero el cuerpo dice que es una
+    página (sin track_detected, que guardaría la radio como pista)."""
     emisora.set_mode(mode)
-    seen = []
+    seen, tracks = [], []
     proxy.rejected.connect(lambda sid, code: seen.append((sid, code)))
+    proxy.track_detected.connect(tracks.append)
     url = proxy.open(emisora.url(), 0, known_live=False)
     sid = proxy.session_id
     resp = requests.get(url, allow_redirects=False, timeout=10)
@@ -235,7 +263,57 @@ def test_un_rechazo_es_una_sola_peticion_sin_302(qtbot, emisora, proxy, mode, st
     assert proxy.last_rejected == (sid, status)
     qtbot.waitUntil(lambda: seen == [(sid, status)], timeout=WAIT)
     qtbot.wait(1500)                    # más que todas las esperas del lector
+    assert len(emisora.streams()) == 1 and tracks == []
+
+
+def test_una_pagina_con_tipo_de_audio_en_un_directo_tambien_es_un_rechazo(qtbot, emisora,
+                                                                        proxy):
+    """I4: con un directo confirmado, la página con tipo de audio solo se
+    reconoce por el principio del cuerpo."""
+    emisora.set_mode('html_as_audio')
+    seen = []
+    proxy.rejected.connect(lambda sid, code: seen.append((sid, code)))
+    url = proxy.open(emisora.url(), 0, known_live=True)
+    sid = proxy.session_id
+    resp = requests.get(url, allow_redirects=False, timeout=10)
+    assert resp.status_code == 502 and proxy.last_rejected == (sid, 200)
+    qtbot.waitUntil(lambda: seen == [(sid, 200)], timeout=WAIT)
+    qtbot.wait(1500)
     assert len(emisora.streams()) == 1
+
+
+@pytest.mark.parametrize("known_live", [False, True])
+def test_una_lista_hls_con_tipo_de_audio_va_por_302(qtbot, emisora, proxy, known_live):
+    """I5: una lista HLS servida como audio/mpeg (y con su tamaño) no es
+    audio que se pueda pasar: 302 para que FFmpeg la abra como lista, sin
+    tomarla por una pista (track_detected guardaría live False)."""
+    emisora.set_mode('hls_as_audio')
+    bypassed, tracks = [], []
+    proxy.bypassed.connect(bypassed.append)
+    proxy.track_detected.connect(tracks.append)
+    url = proxy.open(emisora.url(), 0, known_live=known_live)
+    sid = proxy.session_id
+    resp = requests.get(url, allow_redirects=False, timeout=10)
+    assert resp.status_code == 302 and resp.headers['Location'] == emisora.url()
+    qtbot.waitUntil(lambda: bypassed == [sid], timeout=WAIT)
+    assert tracks == [] and len(emisora.streams()) == 1 and proxy.last_failure is None
+
+
+def test_un_certificado_que_el_proxy_no_valida_va_directo_por_302(qtbot, emisora_tls, proxy):
+    """Una emisora https con un certificado que requests (certifi) no valida
+    y FFmpeg, que no lo comprueba, sí abre (el de un antivirus que inspecciona
+    HTTPS, una cadena incompleta…): la negociación falla antes de que la
+    emisora vea ninguna petición y el proxy redirige; el reproductor conecta
+    directo en ese mismo intento. Con un 502, la entrada de un .pls se
+    saltaba y un directo perdía un intento y su espera."""
+    bypassed = []
+    proxy.bypassed.connect(bypassed.append)
+    url = proxy.open(emisora_tls.url(), 0, known_live=False)
+    sid = proxy.session_id
+    resp = requests.get(url, allow_redirects=False, timeout=10)
+    assert resp.status_code == 302 and resp.headers['Location'] == emisora_tls.url()
+    qtbot.waitUntil(lambda: bypassed == [sid], timeout=WAIT)
+    assert emisora_tls.streams() == [] and proxy.last_failure is None
 
 
 @pytest.mark.parametrize("mode, kind", [('down404', 'http'), ('accept_close', 'network')])
@@ -264,14 +342,16 @@ def test_icy_200_ok_va_directo_por_302_tras_cerrar(qtbot, emisora, proxy):
 
 def test_sin_precarga_un_corte_acaba_la_sesion_sin_reconectar(qtbot, emisora, proxy):
     """Con precarga 0 la sesión es «como directa»: si el origen corta, el
-    reproductor recibe el fin (y MusicService reconecta con su escalera)."""
+    reproductor recibe un corte (y MusicService reconecta con su escalera).
+    Un corte y no el fin: la conexión se le cierra a mitad de una parte, lo
+    que FFmpeg toma por un error; tras una parte entera, sería el fin."""
     player = _Reproductor(proxy.open(emisora.url(), 0, known_live=True))
     qtbot.waitUntil(lambda: len(player.data) > 70000, timeout=WAIT)
     emisora.cut()
     qtbot.waitUntil(lambda: player.closed, timeout=WAIT)
     qtbot.wait(1000)                    # más que la primera espera del lector
     assert len(emisora.streams()) == 1
-    assert not player.finished          # un corte llega como corte (FFmpeg: error)
+    assert player.truncated and not player.finished
 
 
 def test_el_fin_de_una_pista_por_partes_llega_como_fin(qtbot, emisora, proxy):
@@ -281,10 +361,26 @@ def test_el_fin_de_una_pista_por_partes_llega_como_fin(qtbot, emisora, proxy):
     emisora.set_mode('chunked', track_s=1.0)
     player = _Reproductor(proxy.open(emisora.url(), 0, known_live=False))
     qtbot.waitUntil(lambda: player.closed, timeout=WAIT)
-    assert player.status == 200 and player.finished
+    assert player.status == 200 and player.finished and not player.truncated
     assert len(player.data) == len(icecast.MP3_FRAME) * int(1.0 / 0.026)
     qtbot.wait(800)
     assert len(emisora.streams()) == 1
+
+
+@pytest.mark.parametrize("value", ['abc', '0', '999999'])
+def test_un_icy_metaint_que_no_vale_reconecta_sin_metadatos(qtbot, emisora, proxy, value):
+    """I2: con un icy-metaint que no vale no se sabe dónde van los bloques
+    de metadatos: ese audio no se pasa (los mezclaría) y se vuelve a conectar
+    sin pedirlos, tras cerrar la primera conexión y esperar como en un corte."""
+    emisora.set_mode('normal', metaint_header=value)
+    player = _Reproductor(proxy.open(emisora.url(), 0, known_live=True))
+    qtbot.waitUntil(lambda: len(player.data) > 100000, timeout=WAIT)
+    first, second = emisora.streams()
+    assert (first['icy'], second['icy']) == ('1', '')
+    assert _sin_solapes([first, second]) and emisora.max_active == 1
+    assert second['t_open'] - first['t_close'] >= proxy.RETRY_DELAYS_S[0] - 0.05
+    assert b"StreamTitle" not in bytes(player.data)
+    player.stop()
 
 
 def test_un_hipo_corto_no_corta_ni_abre_otra_conexion(qtbot, emisora, proxy):
@@ -357,6 +453,9 @@ def test_solo_se_empalma_el_mismo_formato(qtbot, emisora, proxy, formats, splice
         mark = len(player.data)
         qtbot.waitUntil(lambda: len(player.data) > mark + 100000, timeout=WAIT)
         assert not player.closed
+        # Un demuxer nuevo por conexión: cada una empieza con icy-metaint
+        # bytes de audio; con el de la anterior se colarían sus bloques
+        assert b"StreamTitle" not in bytes(player.data)
         player.stop()
     else:
         qtbot.waitUntil(lambda: player.closed, timeout=WAIT)
@@ -367,6 +466,24 @@ def test_solo_se_empalma_el_mismo_formato(qtbot, emisora, proxy, formats, splice
         other = icecast.FORMATS[formats[1]][1][:4]
         assert other not in data
     assert emisora.max_active == 1
+
+
+def test_si_ya_no_llegara_mas_audio_no_espera_a_la_precarga(qtbot, emisora, proxy):
+    """Una reconexión con precarga larga (los escalones altos) cuyo origen
+    corta enseguida y vuelve en otro formato: el proxy ya sabe que no habrá
+    más audio y le da al reproductor lo que tiene, y el corte, al momento,
+    sin esperar a cumplir la precarga (MusicService recarga antes)."""
+    emisora.formats = ['mp3', 'aac']
+    emisora.set_mode('cut', cut_after_s=0.3, burst=8 * 1024)
+    t0 = time.monotonic()
+    player = _Reproductor(proxy.open(emisora.url(), 8.0, known_live=True))
+    qtbot.waitUntil(lambda: player.closed, timeout=WAIT)
+    assert time.monotonic() - t0 < 4.0
+    assert player.status == 200 and player.truncated
+    data = bytes(player.data)
+    assert find_signature(data) == ('mpeg', 3, 3, 44100)
+    assert icecast.FORMATS['aac'][1][:4] not in data
+    assert len(emisora.streams()) == 2 and emisora.max_active == 1
 
 
 def test_la_sesion_nueva_espera_a_que_cierre_la_anterior(qtbot, emisora, proxy):
@@ -412,6 +529,28 @@ def test_varias_sesiones_seguidas_esperan_en_cadena(qtbot, emisora, proxy):
     third.stop()
 
 
+def test_una_sesion_cerrada_mientras_espera_no_gasta_saldo(qtbot, emisora, proxy):
+    """I6: el tope global cuenta conexiones de verdad. Una sesión que se
+    cierra mientras su lector espera a que cierre la anterior (la anterior,
+    a medio abrir) no llega a conectar y no gasta saldo."""
+    proxy.PREVIOUS_WAIT_S = 1.0
+    budget = ConnectionBudget(1, 600)
+    proxy.open(emisora.url('prem1'), 0, known_live=True, budget=budget)
+    first = proxy._session
+    hold = threading.Event()
+    first.reader = threading.Thread(target=hold.wait, daemon=True)  # su lector, vivo
+    first.reader.start()
+    first.connecting = True              # y a medio conectar: sin liberar
+    player = _Reproductor(proxy.open(emisora.url('prem2'), 0, known_live=True, budget=budget))
+    qtbot.waitUntil(lambda: proxy._session.reader is not None, timeout=WAIT)
+    second = proxy._session
+    proxy.close()                        # pausa mientras espera a la anterior
+    qtbot.waitUntil(lambda: not second.reader.is_alive(), timeout=WAIT)
+    assert emisora.streams() == [] and not budget.full()
+    hold.set()
+    player.stop()
+
+
 def test_cerrar_y_apagar_dejan_cero_conexiones(qtbot, emisora, proxy):
     """I8: close() y shutdown() cortan la conexión con la emisora al momento."""
     player = _Reproductor(proxy.open(emisora.url(), 0, known_live=True))
@@ -423,6 +562,31 @@ def test_cerrar_y_apagar_dejan_cero_conexiones(qtbot, emisora, proxy):
     proxy.shutdown()
     qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=1000)
     assert emisora.max_active == 1
+
+
+def test_cerrar_y_abrir_no_esperan_al_lector(qtbot, emisora, proxy):
+    """I9: con una emisora «sorda» (tras la ráfaga ni manda ni ve el cierre),
+    el hilo lector sigue bloqueado aunque se le corte la conexión (en
+    Windows, hasta DEAD_AIR_S). close() y open(), que llama la interfaz,
+    vuelven al momento: a ese lector lo espera, si hace falta, el nuevo."""
+    proxy.DEAD_AIR_S = 5.0
+    emisora.set_mode('deaf')
+    first = _Reproductor(proxy.open(emisora.url('prem2'), 0, known_live=True))
+    qtbot.waitUntil(lambda: len(first.data) > 40000, timeout=WAIT)
+    session = proxy._session
+    t0 = time.monotonic()
+    proxy.close()
+    closing = time.monotonic() - t0
+    t0 = time.monotonic()
+    url = proxy.open(emisora.url('prem4'), 0, known_live=True)
+    opening = time.monotonic() - t0
+    assert closing < 0.5 and opening < 0.5
+    assert session.reader.is_alive()     # sigue bloqueado: nadie lo esperó
+    second = _Reproductor(url)
+    qtbot.waitUntil(lambda: len(second.data) > 40000, timeout=WAIT)
+    assert len(emisora.streams()) == 2 and emisora.max_active == 1
+    first.stop()
+    second.stop()
 
 
 # ================================================================== MusicService
@@ -553,6 +717,23 @@ def test_un_rechazo_se_rinde_a_la_primera_sin_saltar_de_espejo(qtbot, emisora, m
     assert errors and text in errors[-1]
 
 
+def test_un_rechazo_para_aunque_su_aviso_llegue_tarde(qtbot, emisora, make_service):
+    """I4: el fallo de FFmpeg y la señal rejected llegan cada uno de su hilo.
+    Si el fallo se atiende antes (aquí, la señal no llega), last_rejected
+    basta para parar: ni reintento ni salto al siguiente espejo del .pls,
+    que lleva la misma clave."""
+    svc = make_service()
+    lid, (first, _b, _c) = _desde_el_pls(qtbot, svc, emisora)
+    svc._stream_buffer.rejected.disconnect(svc._on_buffer_rejected)
+    emisora.set_mode('reject403')
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'error', timeout=WAIT)
+    qtbot.wait(2000)                             # más que ERROR_SKIP_MS y una reconexión
+    assert len(emisora.streams()) == 1
+    assert not svc.is_playing and svc.current()['item_id'] == first
+    assert "HTTP 403" in svc.current()['error']
+
+
 def test_un_rechazo_con_el_bufer_sonando_no_martillea(qtbot, emisora, make_service):
     """I4: DI.FM pausa la cuenta en mitad de una sesión con búfer: el
     reintento que descubre el 403 y nada más."""
@@ -614,6 +795,46 @@ def test_una_pista_del_pls_va_directa_por_302_y_se_recuerda(qtbot, emisora, make
     assert all(r['range'] for r in emisora.streams(since))
 
 
+def test_un_corte_de_una_radio_sin_icy_no_la_convierte_en_pista(qtbot, emisora, make_service):
+    """Una radio sin cabeceras icy-* (nginx, un CDN) de vida desconocida: el
+    proxy la sirve y, si el origen se corta, se lo pasa al reproductor como
+    un corte (error), no como el fin del audio. Si no, MusicService la daba
+    por una pista que acabó, la guardaba como live False y dejaba de
+    reconectar (el siguiente corte ya era «No se pudo reproducir»)."""
+    emisora.set_mode('noicy')
+    svc = make_service()
+    lid, [iid] = _radio(svc, emisora.url(), live=None)
+    states = []
+    svc.state_changed.connect(states.append)
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc._live_runtime is True, timeout=WAIT)   # dura 0: un directo
+    emisora.cut()
+    qtbot.waitUntil(lambda: 'reconnecting' in states, timeout=WAIT)
+    qtbot.waitUntil(lambda: svc.state == 'playing' and len(emisora.streams()) == 2,
+                    timeout=WAIT)
+    assert svc.items(lid)[0]['live'] is None and svc.current()['item_id'] == iid
+    assert svc._player.source().port() == svc._stream_buffer.port and emisora.max_active == 1
+
+
+@pytest.mark.parametrize("live", [None, True])
+def test_radio_https_que_el_proxy_no_valida_suena_a_la_primera(qtbot, emisora_tls,
+                                                               make_service, live):
+    """Un certificado que solo el proxy rechaza: el reproductor conecta
+    directo en el mismo intento. Antes, la entrada de un .pls (live None)
+    daba «No se pudo reproducir» y un directo confirmado perdía un intento
+    (y la espera de la reconexión) en cada arranque."""
+    svc = make_service()
+    lid, [iid] = _radio(svc, emisora_tls.url(), live=live)
+    states, errors = [], []
+    svc.state_changed.connect(states.append)
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    assert 'reconnecting' not in states and 'error' not in states and not errors
+    [rec] = emisora_tls.streams()                # solo la de FFmpeg, tras el 302
+    assert rec['ua'].startswith("Lavf") and emisora_tls.max_active == 1
+
+
 def test_tope_global_de_conexiones(qtbot, emisora, make_service):
     """I6: una emisora que da un poco de audio y corta una y otra vez: más
     de RATE_MAX_CONNECTIONS conexiones en la ventana → se para, sin bucle."""
@@ -631,6 +852,46 @@ def test_tope_global_de_conexiones(qtbot, emisora, make_service):
     assert count <= 4 and len(emisora.streams()) == count
 
 
+def test_las_conexiones_directas_tambien_cuentan_para_el_tope(qtbot, emisora, make_service):
+    """I6: si el proxy no puede abrir, cada intento va directo, y también
+    gasta saldo del tope global (si no, el tope real se duplicaría al
+    alternar el proxy y la conexión directa)."""
+    emisora.set_mode('cut', cut_after_s=0.6)
+    svc = make_service()
+    svc.RATE_MAX_CONNECTIONS = 4
+    svc._stream_buffer.open = lambda *_a, **_kw: None
+    lid, [iid] = _radio(svc, emisora.url())
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc.state == 'error', timeout=WAIT * 2)
+    assert errors and "una y otra vez" in errors[-1]
+    recs = emisora.streams()
+    assert len(recs) <= 4 and all(r['ua'].startswith("Lavf") for r in recs)
+    qtbot.wait(1500)
+    assert len(emisora.streams()) == len(recs)
+
+
+def test_los_intentos_solo_vuelven_a_cero_tras_sonar_un_rato(qtbot, emisora, make_service):
+    """I6: una emisora que suena un momento y se corta, una y otra vez. Los
+    intentos solo vuelven a cero tras STABLE_MS sonando seguidos: si
+    volvieran a cero cada vez que suena, MusicService no se rendiría nunca
+    (solo lo pararía el tope global)."""
+    emisora.set_mode('cut', cut_after_s=1.5, burst=16000)
+    svc = make_service(reconnect_delays=(100, 100, 100), buffer_steps=())
+    svc.STABLE_MS = 6000
+    svc.RATE_MAX_CONNECTIONS = 100
+    lid, [iid] = _radio(svc, emisora.url())
+    errors, sounded = [], []
+    svc.error_occurred.connect(errors.append)
+    svc.state_changed.connect(lambda st: st == 'playing' and sounded.append(st))
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc.state == 'error', timeout=WAIT * 2)
+    assert errors and "Se perdió la conexión" in errors[-1]
+    assert len(sounded) >= 2                     # sonó entre corte y corte
+    assert len(emisora.streams()) == 1 + len(svc.RECONNECT_DELAYS_MS)
+
+
 def test_parar_y_cerrar_la_app_dejan_cero_conexiones(qtbot, emisora, make_service):
     svc = make_service()
     lid, [iid] = _radio(svc, emisora.url())
@@ -643,6 +904,28 @@ def test_parar_y_cerrar_la_app_dejan_cero_conexiones(qtbot, emisora, make_servic
     svc.shutdown()
     qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=2000)
     assert emisora.max_active == 1
+
+
+def test_siguiente_y_pausa_no_esperan_al_lector(qtbot, emisora, make_service):
+    """I9: con la emisora «sorda», el hilo lector de la conexión que se deja
+    sigue bloqueado un rato; pasar a la siguiente o pausar no lo esperan en
+    el hilo de la interfaz."""
+    svc = make_service()
+    svc._stream_buffer.DEAD_AIR_S = 5.0
+    emisora.set_mode('deaf')
+    lid, (a, b) = _radio(svc, emisora.url('prem2'), emisora.url('prem4'))
+    svc.play(lid, a)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    t0 = time.monotonic()
+    svc.next()
+    took_next = time.monotonic() - t0
+    qtbot.waitUntil(lambda: svc.state == 'playing' and svc.current()['item_id'] == b,
+                    timeout=WAIT)
+    t0 = time.monotonic()
+    svc.pause()
+    took_pause = time.monotonic() - t0
+    assert took_next < 1.0 and took_pause < 1.0
+    assert len(emisora.streams()) == 2 and emisora.max_active == 1
 
 
 # ================================================================== valores por defecto

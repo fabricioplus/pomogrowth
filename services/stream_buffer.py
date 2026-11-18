@@ -40,12 +40,18 @@ La primera conexión de la sesión decide qué recibe el reproductor:
 - 302 a la URL original, siempre con la conexión del lector ya cerrada (así
   nunca hay dos): solo para lo que no es audio almacenable (una lista HLS
   servida como audio, un «ICY 200 OK» de SHOUTcast v1 que requests no
-  entiende) y para las pistas: con known_live=False (aún no se sabe si es un
-  directo, como las entradas de un .pls), unas cabeceras con Content-Length
-  o Accept-Ranges y sin icy-* son las de un archivo, que el reproductor pide
-  directo con Range para poder saltar (bypassed y track_detected). Con icy-*,
-  o sin tamaño ni rangos, es un directo y se sirve aquí (una pista servida
-  por partes también llega así: se sabe al acabar, y no se empalma).
+  entiende), para lo que el proxy no puede abrir y el reproductor sí (un
+  certificado https que requests no valida, p. ej. el de un antivirus que
+  inspecciona HTTPS, o un fallo del proxy del sistema, que FFmpeg no usa:
+  la emisora no llegó a ver ninguna petición) y para las pistas: con
+  known_live=False (aún no se sabe si es un directo, como las entradas de un
+  .pls), unas cabeceras con Content-Length o Accept-Ranges y sin icy-* son
+  las de un archivo, que el reproductor pide directo con Range para poder
+  saltar (bypassed y track_detected). Antes se mira el principio del cuerpo:
+  una página HTML es un rechazo y una lista HLS va como tal, aunque vengan
+  con tipo de audio. Con icy-*, o sin tamaño ni rangos, es un directo y se
+  sirve aquí (una pista servida por partes también llega así: se sabe al
+  acabar, y no se empalma).
 
 Cortes y reconexiones (siempre secuenciales, cada conexión cerrada antes de
 abrir la siguiente):
@@ -65,14 +71,21 @@ abrir la siguiente):
   que la primera conexión (services.audio_format): si cambia, se sirve lo
   que quede y se cierra, y MusicService recarga con un decodificador nuevo.
 - budget (ConnectionBudget, de MusicService) pone el tope global: cada
-  conexión con el origen gasta una; sin saldo no se conecta.
+  conexión con el origen gasta una (justo antes de abrirla: una sesión que
+  se cierra mientras espera a la anterior no gasta); sin saldo no se conecta.
 
 El reproductor no deja de recibir mientras el lector siga dentro de su
 presupuesto (se le corta solo al cerrar la sesión o cuando ya no habrá más
-audio). Se le sirve por partes (HTTP/1.1 chunked) para que el final diga lo
+audio; si eso se sabe antes de cumplir la precarga, se le sirve ya lo que
+haya). Se le sirve por partes (HTTP/1.1 chunked) para que el final diga lo
 mismo que el del origen: si este acabó entero (por partes o con su tamaño),
-recibe la parte final vacía, el fin de la pista; si se cortó, se le cierra
-sin ella y FFmpeg lo toma por un corte, como si fuera directo. close() corta
+recibe la parte final vacía, el fin de la pista; si no (un corte, el lector
+se rinde, otro formato, un rechazo), se le deja una parte a medias antes de
+cerrar. Cerrar sin más tras una parte entera no basta: FFmpeg lee el cierre
+al buscar el tamaño de la siguiente y lo toma por el fin del archivo
+(AVERROR_EOF), y MusicService guardaría una radio sin icy-* como pista; a
+mitad de una parte es «Stream ends prematurely» (EIO), un error, y
+MusicService reconecta como si fuera directo. close() corta
 la lectura (Deadline.abort: el servidor ve el cierre al momento, aunque en
 Windows el hilo bloqueado en un origen callado tarde hasta DEAD_AIR_S en
 despertar) y la conexión del reproductor; pausa, parar, cambiar de item y
@@ -80,6 +93,7 @@ cerrar la app dejan 0 conexiones con la emisora.
 """
 import secrets
 import socket
+import ssl
 import threading
 import time
 from collections import deque
@@ -128,6 +142,30 @@ def _splices(ctype: str, url: str) -> bool:
     """¿Se pueden empalmar dos conexiones del origen sin romper el audio?"""
     path = urlsplit(url).path.lower()
     return not (any(x in ctype for x in _NO_SPLICE) or path.endswith(_NO_SPLICE_EXTS))
+
+
+def _only_proxy_fails(exc: BaseException) -> bool:
+    """¿Falló algo que solo le pasa al proxy, no al reproductor, y antes de
+    que la emisora viera ninguna petición? Un certificado que requests (con
+    certifi) no valida, porque FFmpeg no lo comprueba: el de un antivirus o
+    un proxy corporativo que inspeccionan HTTPS, una cadena incompleta… Y el
+    proxy del sistema (requests lo toma de Windows; FFmpeg, no). Se mira toda
+    la cadena: requests envuelve el error de urllib3, que envuelve el de ssl."""
+    proxy_errors: Tuple[type, ...] = ()
+    if requests is not None:
+        proxy_errors = (requests.exceptions.ProxyError,)
+    seen, todo = set(), [exc]
+    while todo:
+        cur = todo.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, ssl.SSLCertVerificationError) or isinstance(cur, proxy_errors):
+            return True
+        for nxt in (cur.__cause__, cur.__context__, getattr(cur, 'reason', None), *cur.args):
+            if isinstance(nxt, BaseException):
+                todo.append(nxt)
+    return False
 
 
 class ConnectionBudget:
@@ -258,7 +296,14 @@ class _Session:
         """Con cond tomado: ¿hay ya N s de audio (o venció la espera)?"""
         if self.ready or self.outcome or self.closed:
             return
-        if self.first_data is not None and now - self.first_data >= self.prefill_s:
+        if self.ended:
+            # Ya no llegará más audio (otro formato, el lector se rindió, un
+            # rechazo): esperar a la precarga solo retrasaría la recarga
+            if self.size:
+                self.ready = True
+            else:
+                self._fail_locked()
+        elif self.first_data is not None and now - self.first_data >= self.prefill_s:
             self.ready = True
         elif self.started is not None and now - self.started > self.prefill_s + PREFILL_GRACE_S:
             if self.size:
@@ -344,11 +389,6 @@ class _Session:
     def _run(self) -> None:
         retries = 0     # reconexiones seguidas sin STABLE_AUDIO_S de audio
         while True:
-            budget = self.budget
-            if budget is not None and not budget.take():
-                with self.cond:
-                    self.fail_kind = self.fail_kind or 'budget'
-                return
             state, audio_s = self._read_once()
             if state == 'stop':
                 return
@@ -432,10 +472,17 @@ class _Session:
     def _read_once(self) -> Tuple[str, float]:
         """Una conexión con el origen, hasta que se corte. → ('drop', s de
         audio) si se cortó, ('plain', 0) para repetir sin metadatos o
-        ('stop', 0) si ya no hay que seguir (lo decidido queda en la sesión)."""
+        ('stop', 0) si ya no hay que seguir (lo decidido queda en la sesión,
+        también la falta de saldo del tope global)."""
         dl = Deadline(_NO_TOTAL_S)
         with self.cond:
             if self.closed or self.outcome:
+                return 'stop', 0.0
+            # El saldo se gasta aquí, con la sesión viva: una cerrada mientras
+            # esperaba a la anterior no cuenta una conexión que no abre
+            budget = self.budget
+            if budget is not None and not budget.take():
+                self.fail_kind = self.fail_kind or 'budget'
                 return 'stop', 0.0
             self.deadline = dl
             self.connecting = True
@@ -477,6 +524,11 @@ class _Session:
         if conn.first and is_icy_status_line(exc):
             conn.redirect = 'icy'   # «ICY 200 OK»: requests no lo entiende y FFmpeg sí
             return 'stop', 0.0
+        if conn.first and conn.audio_at is None and _only_proxy_fails(exc):
+            # Certificado que requests no valida o proxy del sistema caído: la
+            # emisora no vio ninguna petición y el reproductor sí puede abrirla
+            conn.redirect = 'tls'
+            return 'stop', 0.0
         return 'drop', conn.audio_s()
 
     def _consume(self, resp, conn: _Conn) -> Tuple[str, float]:
@@ -502,11 +554,11 @@ class _Session:
         if any(x in conn.ctype for x in _NOT_AUDIO) and not has_icy:
             self._http_failure(conn)
             return 'drop', 0.0
-        if conn.first and not self.known_live and not has_icy and (
-                resp.headers.get('Content-Length')
-                or (resp.headers.get('Accept-Ranges') or 'none').strip().lower() != 'none'):
-            conn.redirect = 'track'   # un archivo: que lo pida el reproductor con Range
-            return 'stop', 0.0
+        # Las cabeceras de un archivo; se confirma con el principio del cuerpo
+        # (una página o una lista HLS servidas con tipo de audio también las traen)
+        track = conn.first and not self.known_live and not has_icy and bool(
+            resp.headers.get('Content-Length')
+            or (resp.headers.get('Accept-Ranges') or 'none').strip().lower() != 'none')
         demux = None
         if self.want_icy:
             try:
@@ -518,7 +570,9 @@ class _Session:
                 return 'plain', 0.0
             demux = IcyDemuxer(metaint) if metaint else None
         reference = self.format or ('', None)
-        if conn.first:
+        if track:
+            pass                     # no se va a servir aquí: nada que publicar
+        elif conn.first:
             self._take_headers(resp.headers, conn.ctype, has_icy)
         elif normalize_ctype(conn.ctype) != reference[0]:
             self._end()              # otro formato: no se empalma
@@ -547,6 +601,9 @@ class _Session:
                         conn.redirect = 'hls'   # una lista HLS servida como audio
                     else:
                         self._end()
+                    return 'stop', 0.0
+                if track:
+                    conn.redirect = 'track'   # un archivo: que lo pida el reproductor con Range
                     return 'stop', 0.0
             items = self._interleave(audio, blocks)
             if not items:
@@ -703,9 +760,9 @@ class _Session:
 
 class _Handler(BaseHTTPRequestHandler):
     # HTTP/1.1 para servir por partes (chunked): la parte final vacía es el
-    # fin del audio; cerrar sin ella, un corte. Sin tamaño ni partes, FFmpeg
-    # tomaría cualquier cierre por un error, y el fin de una pista servida
-    # por partes parecería el corte de una radio
+    # fin del audio; una parte a medias, un corte. Sin tamaño ni partes,
+    # FFmpeg tomaría cualquier cierre por un error, y el fin de una pista
+    # servida por partes parecería el corte de una radio
     protocol_version = "HTTP/1.1"
     server_version = "PomoGrowth"
     sys_version = ""
@@ -757,6 +814,11 @@ class _Handler(BaseHTTPRequestHandler):
                 if data is None:
                     if session.ended_cleanly(gen):
                         self.wfile.write(b'0\r\n\r\n')
+                    else:
+                        # Un corte: el tamaño de una parte y cerrar sin ella.
+                        # Cerrar tras una parte entera, FFmpeg lo lee como el
+                        # fin del archivo (AVERROR_EOF), no como un error
+                        self.wfile.write(b'1\r\n')
                     return
                 if data:
                     # Bloquea si el reproductor no lee: es el freno
