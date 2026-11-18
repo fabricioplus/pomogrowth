@@ -3,8 +3,9 @@
 Ventana separada sincronizada por el controller (más limpio que reempaquetar
 la principal, como hacía v8). Mismo lenguaje que la pantalla principal: mini
 anillo de progreso con el tiempo dentro, modo Enfoque/Descanso/Libre con su color,
-tarea activa y controles redondos (play/pausa y saltar descanso): el ciclo
-completo se maneja sin maximizar.
+tarea activa y controles redondos (play/pausa, saltar descanso y «Parar», que
+sale cuando el controlador lo indica: un pomodoro pausado a mitad o una sesión
+libre en marcha o en pausa): el ciclo completo se maneja sin maximizar.
 
 La ventana es transparente y sin marco; lo visible es una tarjeta con
 esquinas redondeadas y sombra, y el margen alrededor deja sitio a la sombra
@@ -49,7 +50,11 @@ class _ElidedLabel(QLabel):
 class CompactWindow(QWidget):
     toggle_requested = Signal()
     skip_requested = Signal()
+    stop_requested = Signal()  # «Parar», como en el timer principal
     expand_requested = Signal()
+
+    STOP_TIPS = {'pomodoro': "Parar: termina este pomodoro aquí y guarda el tiempo",
+                 'free': "Parar: termina la sesión libre y guarda el tiempo"}
 
     CARD_W, CARD_H = 312, 116
     SHADOW = 16   # margen transparente alrededor de la tarjeta para la sombra
@@ -61,6 +66,7 @@ class CompactWindow(QWidget):
         self._is_break = False
         self._free = False  # modo Libre: «Libre» con el icono del infinito
         self._running = False
+        self._stoppable = False  # hay una sesión que «Parar»
         self._task_name = None
         self._time_size = None  # tamaño de cifra aplicado (cambia con «h:mm:ss»)
 
@@ -120,8 +126,10 @@ class CompactWindow(QWidget):
         col.addWidget(self.task_label)
         col.addStretch(1)
 
-        # Controles redondos: play/pausa en el color del modo y saltar
-        # descanso (solo en descanso), como en el timer principal
+        # Controles redondos: play/pausa en el color del modo, saltar
+        # descanso (solo en descanso) y «Parar» (nunca en descanso), como en
+        # el timer principal. La fila va alineada a la izquierda: el play no
+        # se mueve cuando aparece uno u otro
         controls = QHBoxLayout()
         controls.setSpacing(8)
         self.play_btn = QPushButton(self.card)
@@ -140,6 +148,15 @@ class CompactWindow(QWidget):
         self.skip_btn.clicked.connect(self.skip_requested.emit)
         controls.addWidget(self.skip_btn)
         self.skip_btn.setVisible(False)
+        self.stop_btn = IconButton("stop", self.STOP_TIPS['pomodoro'], color=t.fg_dim,
+                                   hover_color=t.accent, size=15, variant="round",
+                                   parent=self.card)
+        self.stop_btn.setFixedSize(32, 32)
+        self.stop_btn.setStyleSheet("QToolButton { border-radius: 16px; }")
+        self.stop_btn.setAccessibleName("Parar")
+        self.stop_btn.clicked.connect(self.stop_requested.emit)
+        controls.addWidget(self.stop_btn)
+        self.stop_btn.setVisible(False)
         controls.addStretch(1)
         col.addLayout(controls)
         row.addLayout(col, 1)
@@ -157,6 +174,7 @@ class CompactWindow(QWidget):
         self.time_label.setStyleSheet(f"color: {t.fg};")
         self.expand_btn.set_colors(t.fg_muted, t.fg)
         self.skip_btn.set_colors(t.fg_dim, t.break_accent)
+        self.stop_btn.set_colors(t.fg_dim, t.accent)
         self._style_mode()
         self._style_task()
 
@@ -182,6 +200,8 @@ class CompactWindow(QWidget):
                                           t.on_accent, 16))
         self.play_btn.setToolTip("Pausar" if self._running else "Iniciar")
         self.skip_btn.setVisible(self._is_break)
+        self.stop_btn.setVisible(self._stoppable and not self._is_break)
+        self.stop_btn.setToolTip(self.STOP_TIPS['free' if self._free else 'pomodoro'])
 
     def _style_task(self) -> None:
         t = tokens()
@@ -200,13 +220,14 @@ class CompactWindow(QWidget):
 
     # ---- API para el controller ----
     def set_state(self, time_text: str, running: bool, task_name, is_break: bool,
-                  free: bool = False) -> None:
+                  free: bool = False, stoppable: bool = False) -> None:
         self._set_time(time_text)
         # Se llama en cada tick: solo se re-estila lo que cambió
         if is_break != self._is_break:
             self.ring.set_break(is_break)
-        if (is_break, running, free) != (self._is_break, self._running, self._free):
-            self._is_break, self._running, self._free = is_break, running, free
+        state = (is_break, running, free, bool(stoppable))
+        if state != (self._is_break, self._running, self._free, self._stoppable):
+            self._is_break, self._running, self._free, self._stoppable = state
             self._style_mode()
         name = task_name or None
         if name != self._task_name:

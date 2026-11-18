@@ -468,6 +468,32 @@ def test_pausar_suena_stop_y_reiniciar_o_saltar_no_suenan(ctrl, clock, sounds, q
     assert sounds == []
 
 
+def test_parar_suena_como_pausar(ctrl, clock, sounds, qtbot):
+    """«Parar» un pomodoro en pausa no suena (el «stop» ya sonó al pausar);
+    parado en marcha (por código) suena «stop» una vez, y nunca «complete»:
+    no se completó. En Libre, «Parar» es el fin de sesión de siempre."""
+    ctrl.select_task(ID1)
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 20)
+    ctrl.toggle_timer()
+    ctrl.timer_panel.stop_btn.click()
+    _drain(qtbot)
+    assert sounds == ['start', 'stop']
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 10)
+    ctrl.stop_session()
+    _drain(qtbot)
+    assert sounds == ['start', 'stop', 'start', 'stop']
+    ctrl.timer_panel.kind_buttons['free'].click()
+    assert ctrl.model.is_free
+    del sounds[:]
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 6 * 60, step=30)
+    ctrl.timer_panel.stop_btn.click()
+    _drain(qtbot)
+    assert sounds == ['start', 'complete']
+
+
 def test_fin_de_pomodoro_con_la_mini_ventana(ctrl, clock, sounds, qtbot):
     ctrl.select_task(ID1)
     ctrl.show_compact()
@@ -495,7 +521,7 @@ def test_fin_de_sesion_libre(ctrl, clock, sounds, qtbot):
     assert ctrl.model.is_free
     ctrl.toggle_timer()
     _work(ctrl, clock, 6 * 60, step=30)
-    ctrl.reset_timer()  # «Terminar sesión»
+    ctrl.reset_timer()  # en Libre termina la sesión, como «Parar»
     _drain(qtbot)
     assert sounds == ['start', 'complete']
     # Una sesión corta (menos de 5 min) no suena, como antes

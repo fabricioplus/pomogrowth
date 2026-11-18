@@ -1,6 +1,12 @@
 """Panel del temporizador: tarea activa, selector «Pomodoro | Libre», anillo
 de progreso con el tiempo dentro, ciclo, controles y tiempo enfocado hoy. Arriba, junto al estado de la
-sincronización, el mini reproductor de música (ui/widgets/mini_player)."""
+sincronización, el mini reproductor de música (ui/widgets/mini_player).
+
+Controles: «Reiniciar» a la izquierda del play (solo en el Pomodoro) y, a la
+derecha, un hueco fijo que comparten «Saltar descanso» (en el descanso) y
+«Parar» (cuando el controlador dice que hay algo que terminar: set_stoppable).
+Los dos laterales ocupan su sitio aunque estén ocultos, así el play queda
+siempre centrado bajo el anillo y no se mueve bajo el cursor."""
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsDropShadowEffect,
@@ -15,10 +21,18 @@ from ui.widgets.marquee_label import MarqueeLabel
 from ui.widgets.progress_ring import ProgressRing
 
 
+def _keep_size(widget: QWidget) -> None:
+    """Oculto, el widget sigue ocupando su sitio en el layout."""
+    policy = widget.sizePolicy()
+    policy.setRetainSizeWhenHidden(True)
+    widget.setSizePolicy(policy)
+
+
 class TimerPanel(QWidget):
     toggle_requested = Signal()
     reset_requested = Signal()
     skip_requested = Signal()
+    stop_requested = Signal()  # «Parar»: terminar la sesión donde está
     complete_task_requested = Signal()
     sync_requested = Signal()
     sync_toggled = Signal(bool)
@@ -31,6 +45,10 @@ class TimerPanel(QWidget):
         self._kind = 'pomodoro'
         self._is_break = False
         self._is_running = False
+        self._stoppable = False  # «Parar» tiene algo que terminar (lo decide el controlador)
+        # Modo que se VE: durante el crossfade aún es el anterior (_is_break
+        # ya es el nuevo) y el hueco de la derecha sigue a lo que se ve
+        self._shown_break = False
         self._sync_state = 'idle'
         self._pending_mode = None  # contenido a aplicar a mitad del crossfade
 
@@ -172,6 +190,8 @@ class TimerPanel(QWidget):
                                     hover_color=t.fg, size=18, variant="round")
         self.reset_btn.setFixedSize(44, 44)
         self.reset_btn.clicked.connect(self.reset_requested.emit)
+        # En Libre se oculta («Parar» termina la sesión) sin mover el play
+        _keep_size(self.reset_btn)
         controls.addWidget(self.reset_btn)
 
         self.play_btn = QPushButton()
@@ -192,7 +212,27 @@ class TimerPanel(QWidget):
         self.skip_btn.setFixedSize(44, 44)
         self.skip_btn.clicked.connect(self.skip_requested.emit)
         self.skip_btn.hide()
-        controls.addWidget(self.skip_btn)
+        # «Parar»: termina la sesión donde está y guarda el tiempo. Sale con
+        # un pomodoro pausado a mitad o con una sesión libre en marcha o en
+        # pausa; nunca en el descanso (ahí está «Saltar descanso»). Gris como
+        # el resto y acento al pasar: termina y guarda, no destruye
+        self.stop_btn = IconButton("stop", self.STOP_TIPS['pomodoro'], color=t.fg_dim,
+                                   hover_color=t.accent, size=18, variant="round")
+        self.stop_btn.setFixedSize(44, 44)
+        self.stop_btn.setAccessibleName("Parar")
+        self.stop_btn.clicked.connect(self.stop_requested.emit)
+        self.stop_btn.hide()
+        # Hueco fijo a la derecha del play para «Saltar descanso» o «Parar»
+        # (nunca los dos): «Parar» aparece justo después de pausar, con el
+        # cursor aún encima del play, y el play no debe irse de debajo
+        self.right_slot = QWidget(self)
+        self.right_slot.setFixedSize(44, 44)
+        slot = QHBoxLayout(self.right_slot)
+        slot.setContentsMargins(0, 0, 0, 0)
+        slot.setSpacing(0)
+        slot.addWidget(self.skip_btn)
+        slot.addWidget(self.stop_btn)
+        controls.addWidget(self.right_slot)
         controls.addStretch(1)
         lay.addLayout(controls)
 
@@ -228,7 +268,18 @@ class TimerPanel(QWidget):
         ThemeManager.instance().theme_changed.connect(self._retheme)
 
     # ---- modo Libre ----
-    KIND_HINT_LOCKED = "Termina o reinicia la sesión para cambiar de modo"
+    # Aviso del selector bloqueado según lo que lo bloquea: nombra solo los
+    # botones de ese estado (en Libre no hay «Reiniciar»; en el descanso no
+    # sale «Parar»; en el Pomodoro, «Parar» sale al pausar)
+    KIND_HINTS_LOCKED = {
+        'pomodoro': "Termina el pomodoro con «Parar» (en pausa) o «Reiniciar»"
+                    " para cambiar de modo",
+        'free': "Termina la sesión con «Parar» para cambiar de modo",
+        'break': "Salta el descanso o espera a que acabe para cambiar de modo"}
+    STOP_TIPS = {
+        'pomodoro': "Parar: termina este pomodoro aquí y guarda el tiempo"
+                    " (no cuenta como completado)",
+        'free': "Parar: termina la sesión libre y guarda el tiempo"}
 
     def _build_kind_selector(self, lay: QVBoxLayout) -> None:
         """Control segmentado «Pomodoro | Libre» encima del anillo (el mismo
@@ -262,21 +313,38 @@ class TimerPanel(QWidget):
         lay.addLayout(row)
 
     def set_kind(self, kind: str) -> None:
-        """Pomodoro o Libre: rótulo e icono del modo, sin puntos del ciclo y
-        con «Terminar sesión» en lugar de «Reiniciar» en el modo Libre."""
+        """Pomodoro o Libre: rótulo e icono del modo y, en el modo Libre, sin
+        puntos del ciclo ni «Reiniciar» (la sesión se termina con «Parar»)."""
         self._kind = 'free' if kind == 'free' else 'pomodoro'
         free = self._kind == 'free'
         self.kind_buttons[self._kind].setChecked(True)
         self.cycle_dots.setVisible(not free)
-        self.reset_btn.set_icon_name("flag" if free else "reset")
-        self.reset_btn.setToolTip("Terminar sesión" if free else "Reiniciar")
+        self.reset_btn.setVisible(not free)
+        self.stop_btn.setToolTip(self.STOP_TIPS[self._kind])
         self._style_mode()
 
-    def set_kind_enabled(self, enabled: bool) -> None:
-        """Con una sesión a medias o en descanso no se cambia de modo."""
+    def set_stoppable(self, stoppable: bool) -> None:
+        """«Parar» tiene algo que terminar (lo decide el controlador); nunca
+        se ve en el descanso."""
+        self._stoppable = bool(stoppable)
+        self._sync_right_slot()
+
+    def _sync_right_slot(self) -> None:
+        """Hueco a la derecha del play: «Saltar descanso» con el descanso a la
+        vista y, fuera de él, «Parar» si hay algo que terminar. Sigue al modo
+        que se ve: al saltar un descanso, «Saltar» sigue hasta la mitad del
+        crossfade y «Parar» no sale antes, así nunca coinciden."""
+        self.skip_btn.setVisible(self._shown_break)
+        self.stop_btn.setVisible(self._stoppable and not (self._is_break or self._shown_break))
+
+    def set_kind_enabled(self, enabled: bool, locked_by: str = 'pomodoro') -> None:
+        """Con una sesión a medias o en descanso no se cambia de modo.
+        `locked_by` ('pomodoro', 'free' o 'break', lo decide el controlador)
+        elige el aviso que explica cómo terminarla."""
+        hint = self.KIND_HINTS_LOCKED.get(locked_by, self.KIND_HINTS_LOCKED['pomodoro'])
         for kind, b in self.kind_buttons.items():
             b.setEnabled(enabled)
-            b.setToolTip(self._kind_tips[kind] if enabled else self.KIND_HINT_LOCKED)
+            b.setToolTip(self._kind_tips[kind] if enabled else hint)
 
     # ---- estilo ----
     def _mode_accent(self) -> str:
@@ -317,6 +385,7 @@ class TimerPanel(QWidget):
         self._style_play()
         self.reset_btn.set_colors(t.fg_dim, t.fg)
         self.skip_btn.set_colors(t.fg_dim, t.break_accent)
+        self.stop_btn.set_colors(t.fg_dim, t.accent)
         self.complete_btn.set_colors(t.fg_dim, t.accent)
         for b in self._panel_btns.values():
             b.set_colors(t.fg_muted, t.fg)
@@ -387,7 +456,8 @@ class TimerPanel(QWidget):
         self._pending_mode = None
         self._style_mode()
         self._style_play()
-        self.skip_btn.setVisible(self._is_break)
+        self._shown_break = self._is_break
+        self._sync_right_slot()
         fade_in = QPropertyAnimation(self._center_fx, b"opacity", self)
         fade_in.setDuration(300)
         fade_in.setStartValue(0.25)
