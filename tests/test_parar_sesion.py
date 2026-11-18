@@ -9,6 +9,13 @@ bandera de «Terminar sesión» ya no están. Nunca en el descanso (ahí está
 «Saltar descanso») y nunca a la vez que él. También en la mini ventana y en la
 bandeja, y el play no se mueve al aparecer.
 
+«En curso» se mide contra el total de la sesión (_session_total): acortar la
+duración a mitad no deja el pomodoro por fresco ni «Parar» sin efecto, y
+volver al Pomodoro con otra duración no lo da por empezado. El aviso dice el
+minuto que marcaba el reloj, y el del selector bloqueado nombra solo los
+botones de ese estado. El aspecto (icono propio, redondo, gris con acento) y
+el aviso junto a la mini ventana también quedan fijados.
+
 Ejecutar desde la raíz del repositorio:
     QT_QPA_PLATFORM=offscreen python -m pytest tests/test_parar_sesion.py -q
 Trabaja sobre datos sintéticos en un directorio temporal — nunca los reales.
@@ -17,10 +24,22 @@ import pytest
 
 from tests.test_free_mode import (ID1, ID_ASANA, POMODORO_MIN, _focus_chunks,  # noqa: F401
                                   _go_free, _work, clock, ctrl, toasts)
+from ui.theme.tokens import tokens
+from ui.widgets.icon_button import ICONS_DIR, tinted_icon
 
 
 def _stop_shown(ctrl) -> bool:
     return ctrl.timer_panel.stop_btn.isVisibleTo(ctrl.timer_panel)
+
+
+def _assert_stop_look(btn) -> None:
+    """El aspecto pedido: icono propio «stop», redondo como «Reiniciar» y
+    «Saltar», gris (fg_dim) con acento al pasar, y nombre accesible."""
+    t = tokens()
+    assert btn._icon_name == "stop"
+    assert btn.property("variant") == "round"
+    assert (btn._color, btn._hover_color) == (t.fg_dim, t.accent)
+    assert btn.accessibleName() == "Parar"
 
 
 def _pause_mid_pomodoro(ctrl, clock, task=ID1, minutes=10):
@@ -52,10 +71,20 @@ def test_parar_aparece_solo_al_pausar_un_pomodoro_a_mitad(ctrl, clock):
     ctrl.toggle_timer()
     assert _stop_shown(ctrl)                           # pausado a mitad: sí
     assert tp.stop_btn.toolTip().startswith("Parar: termina este pomodoro")
-    assert tp.stop_btn.accessibleName() == "Parar"
+    _assert_stop_look(tp.stop_btn)
     assert tp.reset_btn.isVisibleTo(tp)                # «Reiniciar» sigue
     ctrl.toggle_timer()
     assert not _stop_shown(ctrl)                       # al reanudar se va
+
+
+def test_el_icono_de_parar_existe_y_se_pinta(qtbot):
+    """assets/icons/stop.svg está y pinta algo: si falta, tinted_icon da un
+    pixmap transparente sin avisar y «Parar» sería un círculo vacío."""
+    assert (ICONS_DIR / "stop.svg").is_file()
+    center = tinted_icon("stop", "#ffffff", 18).pixmap(18, 18).toImage().pixelColor(9, 9)
+    assert center.alpha() > 200
+    missing = tinted_icon("no-existe", "#ffffff", 18).pixmap(18, 18).toImage().pixelColor(9, 9)
+    assert missing.alpha() == 0                        # la comprobación sirve
 
 
 def test_parar_pomodoro_guarda_el_tiempo_sin_completarlo(ctrl, qtbot, clock, toasts,
@@ -110,6 +139,45 @@ def test_parar_con_la_duracion_acortada_a_mitad(ctrl, clock, toasts):
     assert ctrl._session_total == 10 * 60
 
 
+def test_acortado_a_mitad_el_selector_sigue_bloqueado(ctrl, clock, toasts):
+    """Pausado a los 5 min de 35 y bajado a 10: el modelo lo daría por fresco
+    (le quedan más de 10 min), pero sigue empezado. El selector no se abre al
+    volver a pausar y pulsar «Pomodoro» (ya elegido) no rehace el total, que
+    dejaba «Parar» a la vista sin efecto y el anillo en negativo."""
+    tp = ctrl.timer_panel
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    ctrl.apply_settings(dict(ctrl.data_handler.load_settings(), pomodoro_min=10))
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 30)
+    ctrl.toggle_timer()                                # se re-evalúa el selector
+    assert not tp.kind_buttons['free'].isEnabled()
+    assert not tp.kind_buttons['pomodoro'].isEnabled()
+    ctrl.set_timer_kind('pomodoro')                    # el mismo modo, por código
+    assert ctrl._session_total == POMODORO_MIN * 60
+    assert 0 <= ctrl._timer_fraction(ctrl.model.get_display_time()) <= 1
+    ctrl.set_timer_kind('free')                        # y Libre tampoco entra
+    assert not ctrl.model.is_free and ctrl.model.remaining_time == POMODORO_MIN * 60 - 330
+    assert _stop_shown(ctrl) and ctrl._stop_visible()
+    del toasts[:]
+    tp.stop_btn.click()
+    assert any("a los 05:30" in msg for _, msg in toasts)
+    assert ctrl.model.remaining_time == ctrl._session_total == 10 * 60
+    assert not _stop_shown(ctrl) and tp.kind_buttons['free'].isEnabled()
+
+
+def test_libre_acortado_y_vuelta_al_pomodoro_sin_parar(ctrl, clock, toasts):
+    """En Libre se baja el pomodoro de 35 a 10 y se vuelve al Pomodoro: es un
+    pomodoro fresco y «Parar» no sale (se decidía con el total viejo)."""
+    tp = ctrl.timer_panel
+    _go_free(ctrl)
+    ctrl.apply_settings(dict(ctrl.data_handler.load_settings(), pomodoro_min=10))
+    tp.kind_buttons['pomodoro'].click()
+    assert not ctrl.model.is_free and ctrl.model.remaining_time == 10 * 60
+    assert ctrl._session_total == 10 * 60
+    assert not _stop_shown(ctrl) and not ctrl._stop_visible()
+    assert tp.time_label.text() == "10:00"
+
+
 def test_parar_no_sale_en_el_descanso(ctrl, qtbot, clock, toasts):
     tp = ctrl.timer_panel
     _to_break(ctrl, qtbot, clock)
@@ -159,6 +227,28 @@ def test_parar_corriendo_por_codigo_registra_el_tramo(ctrl, clock, toasts):
     assert any("a los 07:00" in msg for _, msg in toasts)
 
 
+def test_el_aviso_cuadra_con_el_reloj(ctrl, clock, toasts):
+    """Con tiempos reales (fracciones de segundo) el reloj trunca lo que
+    queda: el aviso cuenta lo trabajado según lo que se ve, así los dos suman
+    la duración (antes, con el reloj en 20:00, decía «a los 14:59»)."""
+    ctrl.select_task(ID1)
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 15 * 60 - 0.3)
+    ctrl.toggle_timer()
+    assert ctrl.timer_panel.time_label.text() == "20:00"
+    del toasts[:]
+    ctrl.timer_panel.stop_btn.click()
+    assert toasts and "Pomodoro parado a los 15:00:" in toasts[0][1]
+    # Medio segundo no deja nada guardado: «Parar» vuelve al inicio sin aviso
+    ctrl.toggle_timer()
+    clock.advance(0.5)
+    ctrl.toggle_timer()
+    assert _stop_shown(ctrl)
+    del toasts[:]
+    ctrl.stop_session()
+    assert toasts == [] and ctrl.model.remaining_time == POMODORO_MIN * 60
+
+
 def test_parar_un_pomodoro_fresco_no_hace_nada(ctrl, toasts):
     ctrl.select_task(ID1)
     ctrl.model.pomodoro_cycle_count = 3
@@ -194,6 +284,45 @@ def test_libre_parar_en_marcha_y_en_pausa(ctrl, qtbot, clock, toasts):
     assert tp.stop_btn.toolTip().startswith("Parar: termina este pomodoro")
 
 
+# ---------------------------------------------------------------- selector bloqueado
+def test_el_aviso_del_selector_nombra_lo_que_se_ve(ctrl, qtbot, clock):
+    """Con el selector bloqueado, el aviso dice cómo terminar la sesión con
+    los botones de ese estado: en Libre no hay «Reiniciar» y en el descanso
+    no sale «Parar» (ahí está «Saltar descanso»)."""
+    tp = ctrl.timer_panel
+
+    def tips():
+        return {tp.kind_buttons[k].toolTip() for k in ('pomodoro', 'free')}
+    ctrl.select_task(ID1)
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 60)
+    assert tips() == {tp.KIND_HINTS_LOCKED['pomodoro']}   # pomodoro en marcha
+    assert "«Parar»" in tp.KIND_HINTS_LOCKED['pomodoro']
+    assert "«Reiniciar»" in tp.KIND_HINTS_LOCKED['pomodoro']
+    ctrl.toggle_timer()
+    assert tips() == {tp.KIND_HINTS_LOCKED['pomodoro']}   # pausado: sale «Parar»
+    assert _stop_shown(ctrl) and tp.reset_btn.isVisibleTo(tp)
+    ctrl.toggle_timer()
+    _work(ctrl, clock, POMODORO_MIN * 60)                 # descanso
+    qtbot.waitUntil(lambda: tp.skip_btn.isVisibleTo(tp), timeout=3000)
+    qtbot.wait(500)
+    assert tips() == {tp.KIND_HINTS_LOCKED['break']}
+    assert "Parar" not in tp.KIND_HINTS_LOCKED['break'] and not _stop_shown(ctrl)
+    ctrl.skip_break()
+    ctrl.reset_timer()
+    _go_free(ctrl)
+    ctrl.toggle_timer()                                   # Libre en marcha
+    _work(ctrl, clock, 60)
+    assert tips() == {tp.KIND_HINTS_LOCKED['free']}
+    assert "Reiniciar" not in tp.KIND_HINTS_LOCKED['free']
+    assert "«Parar»" in tp.KIND_HINTS_LOCKED['free']
+    assert not tp.reset_btn.isVisibleTo(tp)
+    ctrl.toggle_timer()
+    assert tips() == {tp.KIND_HINTS_LOCKED['free']}       # en pausa, igual
+    ctrl.stop_session()
+    assert tp.kind_buttons['pomodoro'].toolTip().startswith("Pomodoro:")  # libre de nuevo
+
+
 # ---------------------------------------------------------------- disposición
 def test_el_play_no_se_mueve(ctrl, qtbot, clock):
     """El play queda centrado bajo el anillo en todos los estados: «Parar»
@@ -205,6 +334,9 @@ def test_el_play_no_se_mueve(ctrl, qtbot, clock):
         ring = tp.ring.mapTo(tp, tp.ring.rect().center()).x()
         play = tp.play_btn.mapTo(tp, tp.play_btn.rect().center()).x()
         return play - ring
+    # «Parar» llena su hueco como sus vecinos: ni más pequeño ni descentrado
+    assert tp.stop_btn.size() == tp.skip_btn.size() == tp.reset_btn.size()
+    assert tp.stop_btn.size() == tp.right_slot.size()
     ctrl.select_task(ID1)
     seen = [offset()]
     ctrl.toggle_timer()
@@ -229,17 +361,24 @@ def test_el_play_no_se_mueve(ctrl, qtbot, clock):
 
 
 # ---------------------------------------------------------------- mini ventana
-def test_parar_desde_la_mini_ventana(ctrl, qtbot, clock, toasts):
+def test_parar_desde_la_mini_ventana(ctrl, qtbot, clock, toasts, monkeypatch):
+    from ui.widgets import toast
+    parents = []                                       # dónde se ancla cada aviso
+    monkeypatch.setattr(toast, "show_info", lambda parent, msg, duration=3000: (
+        parents.append(parent), toasts.append(('show_info', msg))))
     _pause_mid_pomodoro(ctrl, clock, minutes=3)
     ctrl.show_compact()
     cw = ctrl.compact_window
     assert cw.stop_btn.isVisibleTo(cw) and not cw.skip_btn.isVisibleTo(cw)
     assert cw.stop_btn.toolTip().startswith("Parar: termina este pomodoro")
+    _assert_stop_look(cw.stop_btn)
     del toasts[:]
     cw.stop_btn.click()
     assert not cw.stop_btn.isVisibleTo(cw)
     assert ctrl.model.remaining_time == POMODORO_MIN * 60
     assert [k for k, _ in toasts] == ['show_info']
+    # El aviso sale junto a la mini ventana, no sobre la principal oculta
+    assert parents == [cw]
     # Libre en la mini ventana: «Parar» con la sesión en marcha
     ctrl.show_normal()
     _go_free(ctrl)
@@ -297,8 +436,10 @@ def test_cambiar_de_tema_con_parar_visible(ctrl, clock, monkeypatch):
     monkeypatch.setattr(cwm, "tokens", lambda: other)
     ctrl.timer_panel._retheme()
     ctrl.compact_window._retheme()
-    assert ctrl.timer_panel.stop_btn._hover_color == other.accent
-    assert ctrl.compact_window.stop_btn._hover_color == other.accent
+    for btn in (ctrl.timer_panel.stop_btn, ctrl.compact_window.stop_btn):
+        # Gris del tema nuevo con su acento al pasar, y sigue siendo redondo
+        assert (btn._color, btn._hover_color) == (other.fg_dim, other.accent)
+        assert btn.property("variant") == "round"
     assert _stop_shown(ctrl)
     assert ctrl.compact_window.stop_btn.isVisibleTo(ctrl.compact_window)
     ctrl.show_normal()

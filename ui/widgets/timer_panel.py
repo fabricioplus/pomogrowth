@@ -268,7 +268,14 @@ class TimerPanel(QWidget):
         ThemeManager.instance().theme_changed.connect(self._retheme)
 
     # ---- modo Libre ----
-    KIND_HINT_LOCKED = "Termina la sesión («Parar» o «Reiniciar») para cambiar de modo"
+    # Aviso del selector bloqueado según lo que lo bloquea: nombra solo los
+    # botones de ese estado (en Libre no hay «Reiniciar»; en el descanso no
+    # sale «Parar»; en el Pomodoro, «Parar» sale al pausar)
+    KIND_HINTS_LOCKED = {
+        'pomodoro': "Termina el pomodoro con «Parar» (en pausa) o «Reiniciar»"
+                    " para cambiar de modo",
+        'free': "Termina la sesión con «Parar» para cambiar de modo",
+        'break': "Salta el descanso o espera a que acabe para cambiar de modo"}
     STOP_TIPS = {
         'pomodoro': "Parar: termina este pomodoro aquí y guarda el tiempo"
                     " (no cuenta como completado)",
@@ -330,11 +337,14 @@ class TimerPanel(QWidget):
         self.skip_btn.setVisible(self._shown_break)
         self.stop_btn.setVisible(self._stoppable and not (self._is_break or self._shown_break))
 
-    def set_kind_enabled(self, enabled: bool) -> None:
-        """Con una sesión a medias o en descanso no se cambia de modo."""
+    def set_kind_enabled(self, enabled: bool, locked_by: str = 'pomodoro') -> None:
+        """Con una sesión a medias o en descanso no se cambia de modo.
+        `locked_by` ('pomodoro', 'free' o 'break', lo decide el controlador)
+        elige el aviso que explica cómo terminarla."""
+        hint = self.KIND_HINTS_LOCKED.get(locked_by, self.KIND_HINTS_LOCKED['pomodoro'])
         for kind, b in self.kind_buttons.items():
             b.setEnabled(enabled)
-            b.setToolTip(self._kind_tips[kind] if enabled else self.KIND_HINT_LOCKED)
+            b.setToolTip(self._kind_tips[kind] if enabled else hint)
 
     # ---- estilo ----
     def _mode_accent(self) -> str:

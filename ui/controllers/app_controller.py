@@ -445,12 +445,17 @@ class AppController(QObject):
             return
         if not self._work_in_progress():
             return
-        worked = max(0.0, self._session_total - self.model.get_display_time())
+        left = self.model.get_display_time()
+        elapsed = self._session_total - left
+        # El aviso cuenta lo trabajado según el reloj, que trunca lo que
+        # queda: con fracciones de segundo, restar el valor exacto daba un
+        # segundo de menos («a los 14:59» con el reloj en 20:00 de 35:00)
+        worked = self._session_total - int(left)
         was_running = self.model.is_running
         self.reset_timer(keep_cycle=True)
         if was_running:
             sound_service.play("stop")  # como al pausar; en pausa ya sonó
-        if worked >= 1:
+        if elapsed >= 1:  # menos de 1 s no deja nada guardado
             toast.show_info(self._feedback_window(),
                             f"Pomodoro parado a los {self._clock_text(worked)}: el tiempo "
                             "queda guardado. La XP y las monedas llegan al completarlo.",
@@ -652,14 +657,24 @@ class AppController(QObject):
     # ================= Modo Libre =================
     def set_timer_kind(self, kind: str, save: bool = True) -> None:
         """Selector «Pomodoro | Libre». Solo con el timer parado, fuera del
-        descanso y sin sesión a medias (si no, el modelo lo rechaza y el
-        selector vuelve al modo vigente). El último modo se recuerda."""
-        changed = self.model.set_kind(kind)
+        descanso y sin sesión a medias (si no, se rechaza y el selector vuelve
+        al modo vigente). El último modo se recuerda."""
+        old = self.model.timer_kind
+        # «A medias» como en «Parar» (_work_in_progress, contra _session_total):
+        # el modelo mide contra pomodoro_duration y daría por fresco un
+        # pomodoro pausado tras acortar su duración en Ajustes
+        if not self._work_in_progress():
+            self.model.set_kind(kind)
         self.timer_panel.set_kind(self.model.timer_kind)
-        self._sync_kind_selector()
-        if not changed:
+        if self.model.timer_kind == old:
+            # Mismo modo (o rechazado): nada que re-sembrar. Rehacer aquí
+            # _session_total dejaba «Parar» a la vista y sin efecto
+            self._sync_kind_selector()
             return
+        # El total nuevo ANTES de decidir «Parar»: con el viejo, un pomodoro
+        # fresco más corto que el anterior parecía empezado
         self._session_total = self.model.pomodoro_duration
+        self._sync_kind_selector()
         self._update_timer_display()
         self._sync_compact()
         settings = self.data_handler.load_settings()
@@ -668,11 +683,14 @@ class AppController(QObject):
             self.data_handler.save_settings(settings)
 
     def _sync_kind_selector(self) -> None:
-        """Con una sesión a medias o en descanso el modo no se cambia. De
-        paso, «Parar» se ve solo con algo que parar (se llama en cada cambio
-        de estado del timer)."""
-        self.timer_panel.set_kind_enabled(not self.model.is_break_time
-                                          and not self.model.is_session_in_progress())
+        """Con una sesión a medias o en descanso el modo no se cambia, y el
+        aviso del selector dice cómo terminarla con los botones de ese estado.
+        De paso, «Parar» se ve solo con algo que parar (se llama en cada
+        cambio de estado del timer)."""
+        m = self.model
+        self.timer_panel.set_kind_enabled(
+            not m.is_break_time and not self._work_in_progress(),
+            locked_by='break' if m.is_break_time else m.timer_kind)
         self.timer_panel.set_stoppable(self._stop_visible())
 
     def _split_free_at_midnight(self) -> None:
