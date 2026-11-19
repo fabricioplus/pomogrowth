@@ -735,11 +735,115 @@ def test_el_nombre_del_canal_es_por_usuario_sin_el_nombre(monkeypatch):
     assert a != b and a.startswith("PomoGrowth-") and "Ana" not in a
 
 
+def test_la_carpeta_de_la_instalacion_distingue_y_normaliza(monkeypatch, tmp_path):
+    """install_id: la instalada y una portable (otra carpeta, con sus datos)
+    no son la misma; la misma carpeta escrita con otras mayúsculas, sí. Y
+    no deja la ruta a la vista (lleva el nombre de usuario)."""
+    from services import singleton
+    installed, portable = tmp_path / "Instalada", tmp_path / "Portable"
+    installed.mkdir()
+    portable.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    ids = {}
+    for name, folder in (("instalada", installed), ("portable", portable),
+                         ("otra_grafia", Path(str(installed).upper()))):
+        monkeypatch.setattr(sys, "executable", str(folder / "PomoGrowth.exe"))
+        ids[name] = singleton.install_id()
+    assert ids["instalada"] != ids["portable"]
+    if sys.platform == "win32":
+        assert ids["otra_grafia"] == ids["instalada"]
+    assert all(len(v) == 12 and "Instalada" not in v for v in ids.values())
+
+
+@pytest.mark.parametrize("closing, expect", [(False, "other"), (True, "closing")])
+def test_el_canal_no_se_muestra_a_otra_carpeta(qtbot, closing, expect):
+    """De otra carpeta, no se muestra: «other» (la otra da su aviso) o, si
+    esta se está despidiendo, «closing» (el puerto es de todo el equipo: la
+    otra espera a que se cierre y arranca)."""
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name,
+                                       is_closing=lambda: closing, install="otra-carpeta")
+    try:
+        reply, _seconds = _second_instance(qtbot, name)    # la del repo: otra
+        assert reply == expect and shown == []
+    finally:
+        server.close()
+        server.deleteLater()
+
+
+def test_un_show_sin_carpeta_es_de_otra(qtbot):
+    """Un «show» a secas viene de una versión sin la carpeta (otra
+    instalación): tampoco se muestra."""
+    from PySide6.QtNetwork import QLocalSocket
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name)
+    sock = QLocalSocket()
+    try:
+        sock.connectToServer(name)
+        assert sock.waitForConnected(1000)
+        sock.write(b"show\n")
+        sock.flush()
+        got = bytearray()
+        qtbot.waitUntil(lambda: got.extend(bytes(sock.readAll())) or b"\n" in got,
+                        timeout=3000)
+        assert bytes(got).strip() == singleton.OTHER_REPLY and shown == []
+    finally:
+        sock.abort()
+        server.close()
+        server.deleteLater()
+
+
+_OTHER_FOLDER = ("import sys; sys.path.insert(0, sys.argv[1])\n"
+                 "sys.frozen = True; sys.executable = sys.argv[3]\n"
+                 "from PySide6.QtWidgets import QApplication, QMessageBox\n"
+                 "app = QApplication([])\n"
+                 "from services import singleton\n"
+                 "singleton.channel_name = lambda: sys.argv[2]\n"
+                 "seen = []\n"
+                 "QMessageBox.warning = staticmethod(lambda *a, **k: seen.append(a[2]))\n"
+                 "import main\n"
+                 "code = main._already_running(False)\n"
+                 "print(code, int(len(seen) == 1 and 'otra carpeta' in seen[0]))\n")
+
+
+def test_abrir_otra_carpeta_no_trae_al_frente_la_abierta(qtbot, tmp_path):
+    """La instalada abierta y se abre la portable (u otro build, o el repo):
+    no consigue el puerto, que es de todo el equipo, pero tampoco puede
+    traer al frente la otra, con sus datos y su código: el usuario creería
+    tener delante la que abrió. La abierta se queda como está y la nueva
+    dice por qué no arranca. Con un proceso de verdad, «congelado» en otra
+    carpeta, y main._already_running."""
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name)
+    exe = tmp_path / "portable" / "PomoGrowth.exe"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.Popen([sys.executable, "-c", _OTHER_FOLDER, str(V9), name, str(exe)],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    try:
+        qtbot.waitUntil(lambda: proc.poll() is not None, timeout=60000)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        server.close()
+        server.deleteLater()
+    out = proc.stdout.read().split()
+    assert proc.returncode == 0 and out[-2:] == ["1", "1"], out
+    assert shown == []
+
+
 @pytest.mark.parametrize("elevated, reply, freed, code, warned, asked", [
     (False, "shown", None, 0, False, True),       # la primera se muestra: sin aviso
     (False, "", None, 1, True, True),             # no contesta: el aviso de siempre
     (False, "closing", True, None, False, True),  # se despedía: arranca esta
     (False, "closing", False, 1, True, True),     # se despide y no acaba: el aviso
+    (False, "other", None, 1, True, True),        # de otra carpeta: su aviso
     (True, "shown", None, 1, True, False),        # administradora: el aviso
 ])
 def test_main_con_otra_instancia_abierta(monkeypatch, qtbot, elevated, reply, freed, code,

@@ -1694,10 +1694,16 @@ class AppController(QObject):
         con la compacta abierta, quedaban las dos)."""
         self.show_normal()
 
+    def is_closing(self) -> bool:
+        """¿Se está cerrando (la despedida)? Para el canal de services/singleton:
+        a otra PomoGrowth, de otra carpeta, se le dice que espere."""
+        return self._is_closing
+
     def show_from_other_instance(self) -> bool:
-        """Se abrió otra PomoGrowth con esta en marcha (services/singleton):
-        esta sale al frente, la principal sin la compacta, con su «encima de
-        todo» repuesto y activa (show_normal → fade_show). Durante el splash
+        """Se abrió otra PomoGrowth, de la misma carpeta, con esta en marcha
+        (services/singleton; una de otra carpeta no llega aquí): esta sale
+        al frente, la principal sin la compacta, con su «encima de todo»
+        repuesto y activa (show_normal → fade_show). Durante el splash
         del arranque solo se adelanta el splash: la principal llega cuando
         termine. False si se está cerrando (la despedida): no se muestra, y
         la otra espera a que esta salga para arrancar ella."""

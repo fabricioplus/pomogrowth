@@ -9,11 +9,18 @@ quizá minimizada, en la bandeja o detrás de otras ventanas): en vez de solo
 avisar de que ya está abierta, le pide a la primera que se muestre. La
 primera escucha con listen_for_show() en un canal local (QLocalServer; en
 Windows, una tubería con nombre) con un nombre por usuario; la segunda envía
-«show» con request_show() y espera su respuesta unos instantes:
-- «ok»: la primera se mostró; la segunda sale sin más.
+«show <carpeta>» con request_show() (el resumen de la carpeta de su
+instalación: install_id) y espera su respuesta unos instantes:
+- «ok»: la primera, de la misma carpeta, se mostró; la segunda sale sin más.
 - «closing»: la primera se está cerrando (su despedida dura unos segundos) y
-  no se muestra; la segunda espera a que suelte el puerto y arranca ella,
-  o el usuario se quedaría sin ninguna PomoGrowth abierta.
+  no se muestra; la segunda espera a que suelte el puerto (que es de todo el
+  equipo, sea cual sea la carpeta) y arranca ella, o el usuario se quedaría
+  sin ninguna PomoGrowth abierta.
+- «other»: la primera es de otra carpeta (la instalada y una portable, otro
+  build, el repo: cada una con sus datos) y no se muestra. Traerla al frente
+  dejaría al usuario con los datos y el código de la otra creyendo que abrió
+  esta: main.py da un aviso que lo dice. Un «show» sin carpeta también es de
+  otra (una versión sin ella).
 - Nada: no conecta o no contesta a tiempo (p. ej. la primera está colgada):
   main.py da el aviso de siempre.
 Los plazos son cortos: el arranque nunca se queda esperando a una primera
@@ -38,10 +45,11 @@ ELEVATED_RESTART_FLAG = "--elevated-restart"
 SHOW_COMMAND = b"show"
 SHOW_REPLY = b"ok"
 CLOSING_REPLY = b"closing"
+OTHER_REPLY = b"other"
 _MAX_REQUEST = 64       # bytes que se leen de un cliente como mucho
 _CLIENT_TTL_MS = 2000   # una conexión que no dice nada se cierra a los 2 s
 # Lo que devuelve request_show() (compárese con estas: CLOSING también es «verdadero»)
-SHOWN, CLOSING, NO_ANSWER = "shown", "closing", ""
+SHOWN, CLOSING, OTHER, NO_ANSWER = "shown", "closing", "other", ""
 # La segunda espera como mucho esto a que una primera que se está cerrando
 # suelte el puerto: su despedida (ui/windows/welcome_farewell, 8 s, que se
 # alarga con el ratón encima) y el cierre del proceso
@@ -85,17 +93,37 @@ def channel_name() -> str:
     return f"PomoGrowth-mostrar-{digest}"
 
 
+def install_id() -> str:
+    """Resumen de la carpeta de esta PomoGrowth (utils.paths.app_base: la del
+    exe, o la raíz del proyecto en desarrollo), que es donde viven sus datos.
+    Normalizada (realpath resuelve rutas cortas 8.3 y enlaces; normcase, las
+    mayúsculas) para que la misma carpeta escrita de otra forma cuente como
+    la misma. Como el canal con el usuario: el resumen, no la ruta."""
+    from utils.paths import app_base
+    base = str(app_base())
+    try:
+        base = os.path.realpath(base)
+    except (OSError, ValueError):
+        pass
+    key = os.path.normcase(base).encode("utf-8", "surrogatepass")
+    return hashlib.sha1(key).hexdigest()[:12]
+
+
 def listen_for_show(on_show: Callable[[], Optional[bool]], name: Optional[str] = None,
-                    parent=None):
-    """La primera instancia escucha las peticiones «show» y llama a
-    `on_show` (en el hilo de la interfaz) por cada una. Contesta «ok» si se
-    mostró y «closing» si `on_show` devuelve False (se está cerrando); si
-    falla, cierra sin contestar (la segunda da el aviso de siempre).
+                    parent=None, is_closing: Optional[Callable[[], bool]] = None,
+                    install: Optional[str] = None):
+    """La primera instancia escucha las peticiones «show <carpeta>». Si es la
+    suya (`install`, por defecto install_id()), llama a `on_show` (en el hilo
+    de la interfaz) y contesta «ok» si se mostró y «closing» si `on_show`
+    devuelve False (se está cerrando); si falla, cierra sin contestar (la
+    segunda da el aviso de siempre). Si es de otra carpeta, no se muestra:
+    «closing» si `is_closing()` dice que se está cerrando y, si no, «other».
     Devuelve el QLocalServer, o None si no se pudo abrir (la app sigue sin
     él: una segunda instancia daría el aviso de siempre). Solo el mismo
     usuario puede conectarse; lo que no sea «show» se ignora."""
     from PySide6.QtCore import QTimer
     from PySide6.QtNetwork import QLocalServer
+    own = (install or install_id()).encode("ascii", "replace")
     server = QLocalServer(parent)
     server.setSocketOptions(QLocalServer.UserAccessOption)
     if not server.listen(name or channel_name()):
@@ -115,16 +143,23 @@ def listen_for_show(on_show: Callable[[], Optional[bool]], name: Optional[str] =
             if b"\n" not in received and len(received) < _MAX_REQUEST:
                 return  # la línea aún no ha llegado entera
             answered.append(True)
-            if bytes(received).split(b"\n", 1)[0].strip() != SHOW_COMMAND:
+            command, _sp, folder = bytes(received).split(b"\n", 1)[0].strip().partition(b" ")
+            if command != SHOW_COMMAND:
                 client.abort()
                 return
             try:
-                shown = on_show() is not False
+                if folder != own:
+                    # Otra instalación, con sus datos: mostrarse la confundiría
+                    logging.info("Otra PomoGrowth, de otra carpeta, pidió mostrar la ventana")
+                    reply = (CLOSING_REPLY if is_closing is not None and is_closing()
+                             else OTHER_REPLY)
+                else:
+                    reply = SHOW_REPLY if on_show() is not False else CLOSING_REPLY
             except Exception:
                 logging.exception("Al mostrar la ventana para otra instancia")
                 client.abort()
                 return
-            client.write((SHOW_REPLY if shown else CLOSING_REPLY) + b"\n")
+            client.write(reply + b"\n")
             client.flush()
             client.disconnectFromServer()
         client.readyRead.connect(read)
@@ -139,12 +174,15 @@ def listen_for_show(on_show: Callable[[], Optional[bool]], name: Optional[str] =
     return server
 
 
-def request_show(name: Optional[str] = None, timeout_ms: int = 1500) -> str:
-    """La segunda instancia pide a la primera que se muestre. Devuelve SHOWN
-    si contestó «ok» dentro del plazo, CLOSING si contestó que se está
-    cerrando y NO_ANSWER si no hay nadie escuchando, no contesta a tiempo o
-    algo falla (entonces, el aviso). Bloquea como mucho ~`timeout_ms`
-    (conectar, enviar y esperar la respuesta comparten el plazo)."""
+def request_show(name: Optional[str] = None, timeout_ms: int = 1500,
+                 install: Optional[str] = None) -> str:
+    """La segunda instancia pide a la primera que se muestre, con la carpeta
+    de la suya (`install`, por defecto install_id()). Devuelve SHOWN si
+    contestó «ok» dentro del plazo, CLOSING si contestó que se está
+    cerrando, OTHER si es de otra carpeta y NO_ANSWER si no hay nadie
+    escuchando, no contesta a tiempo o algo falla (entonces, el aviso).
+    Bloquea como mucho ~`timeout_ms` (conectar, enviar y esperar la
+    respuesta comparten el plazo)."""
     from PySide6.QtNetwork import QLocalSocket
     from utils.win_native import allow_foreground_to_others
     deadline = time.monotonic() + timeout_ms / 1000
@@ -159,7 +197,8 @@ def request_show(name: Optional[str] = None, timeout_ms: int = 1500) -> str:
         # Que la ventana de la primera pueda pasar al frente (Windows solo lo
         # permite al proceso que el usuario acaba de abrir: este)
         allow_foreground_to_others()
-        sock.write(SHOW_COMMAND + b"\n")
+        folder = (install or install_id()).encode("ascii", "replace")
+        sock.write(SHOW_COMMAND + b" " + folder + b"\n")
         if not sock.waitForBytesWritten(left()):
             return NO_ANSWER
         reply = b""
@@ -168,7 +207,8 @@ def request_show(name: Optional[str] = None, timeout_ms: int = 1500) -> str:
                 break
             reply += bytes(sock.readAll())
         line = reply.split(b"\n", 1)[0].strip()
-        return {SHOW_REPLY: SHOWN, CLOSING_REPLY: CLOSING}.get(line, NO_ANSWER)
+        return {SHOW_REPLY: SHOWN, CLOSING_REPLY: CLOSING,
+                OTHER_REPLY: OTHER}.get(line, NO_ANSWER)
     except Exception:
         return NO_ANSWER
     finally:
