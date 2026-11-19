@@ -882,6 +882,8 @@ def test_el_aviso_no_tapa_los_controles_de_la_compacta(qtbot, where):
             assert card.bottom() < compact_card.top()      # no cabe debajo: encima
         else:
             assert card.top() > compact_card.bottom()      # debajo
+        # Y aunque tapara algo, los clics lo atraviesan (no tiene nada que pulsar)
+        assert t.windowFlags() & Qt.WindowTransparentForInput
     finally:
         toast.dismiss(t)
 

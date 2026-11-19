@@ -481,6 +481,41 @@ def test_parar_desde_la_mini_ventana(ctrl, qtbot, clock, toasts, monkeypatch):
     ctrl.show_normal()
 
 
+@pytest.mark.parametrize("height", [520, 600])
+@pytest.mark.parametrize("folded", [False, True], ids=["normal", "plegada"])
+def test_el_aviso_de_parar_deja_pasar_el_clic_al_play(ctrl, qtbot, clock, folded, height):
+    """La principal más baja que la de serie (720; en un portátil 1080p al
+    150 % no cabe), entera o plegada: la esquina del aviso son ▶,
+    «Reiniciar» y el hueco de «Parar». El aviso de «Parar» (tres líneas,
+    ~3,5 s) cae ahí justo cuando lo siguiente es pulsar ▶, y se quedaba el
+    clic. Ahora los clics lo atraviesan. En offscreen widgetAt no respeta
+    WindowTransparentForInput: se mira la bandera."""
+    from PySide6.QtCore import QPoint, QRect, QSize, Qt
+    from ui.widgets import toast
+    from ui.windows.main_window import MIN_WIDTH_COLLAPSED
+    win, tp = ctrl.window, ctrl.timer_panel
+    if folded:
+        ctrl.toggle_task_panel()
+        qtbot.wait(400)
+    win.resize(MIN_WIDTH_COLLAPSED if folded else 1100, height)
+    qtbot.wait(150)
+    _pause_mid_pomodoro(ctrl, clock, minutes=10)
+    before = {id(t) for t in toast._active_toasts}
+    tp.stop_btn.click()
+    [shown] = [t for t in toast._active_toasts if id(t) not in before]
+    try:
+        qtbot.wait(350)                                # tras su entrada
+        card = QRect(shown.mapToGlobal(QPoint(shown.PAD, shown.PAD)),
+                     shown.size() - QSize(2 * shown.PAD, 2 * shown.PAD))
+        play = QRect(tp.play_btn.mapToGlobal(QPoint(0, 0)), tp.play_btn.size())
+        assert card.intersects(play)                   # el caso: cae sobre ▶
+        assert shown.windowFlags() & Qt.WindowTransparentForInput
+    finally:
+        toast.dismiss(shown)
+        if folded:
+            ctrl.toggle_task_panel()
+
+
 def test_mini_ventana_sin_parar_en_el_descanso(ctrl, qtbot, clock, toasts):
     _to_break(ctrl, qtbot, clock)
     ctrl.show_compact()

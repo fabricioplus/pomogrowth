@@ -5,7 +5,9 @@ Dónde salen: en la esquina inferior derecha de su ventana, apilados. Sobre
 una ventana pequeña o translúcida (la compacta) esa esquina son sus
 controles, y el toast, siempre encima y con los clics para él, los tapaba:
 ahí sale fuera de su tarjeta, debajo (o encima si abajo no cabe), recortado
-a la pantalla.
+a la pantalla. Y en ningún sitio se queda los clics (no tiene nada que
+pulsar): en la principal baja, su esquina cae sobre ▶ y «Reiniciar», y el
+clic llega a ellos.
 
 show_*() devuelven el toast; dismiss() lo quita al momento, para que quien
 avisa de lo mismo varias veces (la música) sustituya su aviso en vez de
@@ -37,7 +39,11 @@ class Toast(QWidget):
                  icon: str = "info"):
         super().__init__(parent_window)
         t = tokens()
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
+        # Solo informa: los clics lo atraviesan (WindowTransparentForInput). En
+        # la principal baja de ~730 px, su esquina son ▶ y «Reiniciar», y el
+        # aviso de «Parar» se quedaba el clic al play justo después
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint
+                            | Qt.WindowTransparentForInput)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WA_TranslucentBackground)
 
