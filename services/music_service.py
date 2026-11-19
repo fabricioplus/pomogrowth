@@ -44,8 +44,12 @@ Contrato con la interfaz (resumen; detalle en cada método):
   no como fin: una radio sin icy-* no se confunde con una pista que acabó.
 - Rechazo: con 401/402/403/407/429/451, o una página web donde iba el
   audio, el proxy hace una sola petición y avisa (rejected): se para a la
-  primera, sin reintentar ni saltar al siguiente espejo, con un mensaje que
-  lleva el código (con el 429, que la emisora pide esperar).
+  primera, sin reintentar ni saltar al siguiente espejo (los de un .pls de
+  DI.FM llevan la misma clave), con un mensaje que lleva el código (con el
+  429, que la emisora pide esperar). Salvo una emisora cuya URL no lleva
+  cuenta (ni consulta ni usuario, como las radios de serie) que aún no sonó
+  desde que se eligió, en una lista con más: llena, vetada en este país o
+  tras un portal, pasa a la siguiente como una radio caída.
 - Tope global: más de RATE_MAX_CONNECTIONS conexiones con el origen en
   RATE_WINDOW_S (las del proxy y las directas, desde que se le dio a
   reproducir ese item) → se para con un mensaje claro, sin bucles.
@@ -83,6 +87,7 @@ import random
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer
@@ -1164,7 +1169,12 @@ class MusicService(QObject):
             return
         if self._stop_if_rejected():
             return   # ni reintentar ni saltar al siguiente espejo
-        if self._treat_as_live():
+        rejected = self._rejected_status()
+        if rejected is not None:
+            # Una emisora sin cuenta que rechaza antes de sonar: a la siguiente,
+            # con el motivo (nunca se reintenta: _rejection_skips)
+            message, short = self._rejected_skip_texts(rejected, item['title'])
+        elif self._treat_as_live():
             self._schedule_reconnect()
             return
         self._unload()
@@ -1359,13 +1369,59 @@ class MusicService(QObject):
         return (f"La emisora rechazó la conexión: envió una página web en vez del "
                 f"audio. {advice}", "Rechazada por la emisora (página web)")
 
-    def _stop_if_rejected(self) -> bool:
-        """¿La emisora rechazó la conexión en curso? Entonces se para ya (el
-        aviso del proxy pudo llegar después del fallo de FFmpeg)."""
+    @classmethod
+    def _rejected_skip_texts(cls, status: int, title: str) -> Tuple[str, str]:
+        """(aviso, motivo corto) de un rechazo que pasa a la siguiente, sin el
+        «: paso a la siguiente» que añade _on_failure ni el consejo de las
+        radios de pago (la URL no lleva cuenta)."""
+        short = cls._rejected_texts(status)[1]
+        if status == 429:
+            return f"«{title}» pide esperar antes de volver a conectar (HTTP 429)", short
+        if status >= 400:
+            return f"«{title}» rechazó la conexión (HTTP {status})", short
+        return f"«{title}» envió una página web en vez del audio", short
+
+    @staticmethod
+    def _has_account(url: str) -> bool:
+        """¿Lleva la URL algo que identifique una cuenta: una consulta (la
+        ?clave de DI.FM, un listen_key, un token) o usuario y contraseña? Las
+        radios de serie no llevan nada. Ante la duda, sí."""
+        try:
+            parts = urlsplit(url)
+            return bool(parts.query or parts.username or parts.password)
+        except ValueError:
+            return True
+
+    def _rejection_skips(self) -> bool:
+        """¿Un rechazo del item actual se salta como una radio caída en vez
+        de parar? Solo si aún no sonó desde que se eligió, la lista tiene más
+        y su URL no lleva cuenta: una emisora gratuita llena (Icecast da 403
+        con el cupo de oyentes lleno), vetada en este país o tras un portal
+        no tiene por qué tapar a las demás. Con cuenta se para a la primera:
+        los espejos y canales de un servicio de pago comparten la clave y
+        otra conexión alargaría la pausa. Implica not _treat_as_live(): un
+        rechazo que se salta nunca se reintenta."""
+        item = self._current_item()
+        return (item is not None and item['kind'] == 'url' and not self._played
+                and len(self._items_of(self._cur_list)) > 1
+                and not self._has_account(item['source']))
+
+    def _rejected_status(self) -> Optional[int]:
+        """El estado con que la emisora rechazó la conexión en curso, o None.
+        El aviso del proxy pudo llegar después del fallo de FFmpeg:
+        last_rejected ya lo sabe."""
         last = self._stream_buffer.last_rejected
-        if not (self._proxied and last and last[0] == self._proxy_sid):
+        if self._proxied and last and last[0] == self._proxy_sid:
+            return last[1]
+        return None
+
+    def _stop_if_rejected(self) -> bool:
+        """¿La emisora rechazó la conexión en curso y hay que parar? Entonces
+        se para ya, salvo que el rechazo se salte (_rejection_skips)."""
+        status = self._rejected_status()
+        if status is None or self._rejection_skips():
             return False
-        self._give_up(*self._rejected_texts(last[1]))
+        self._give_up(*self._rejected_texts(status))
         return True
 
     def _bump_buffer(self) -> None:
@@ -1420,8 +1476,15 @@ class MusicService(QObject):
 
     def _on_buffer_rejected(self, sid: int, status: int) -> None:
         """401/403…: la emisora no nos quiere ahora (cuenta en otro sitio o en
-        pausa). Insistir solo alarga la pausa: se para a la primera."""
+        pausa). Insistir solo alarga la pausa: se para a la primera. Una
+        emisora sin cuenta que aún no sonó, en una lista con más, pasa a la
+        siguiente (_rejection_skips) por el mismo camino que un fallo de
+        FFmpeg: _on_failure la reconoce por last_rejected, y el fallo que
+        llegue detrás ya no cuenta (_active) o se descarta (_proxied)."""
         if sid != self._proxy_sid or not self._proxied or not self._want:
+            return
+        if self._rejection_skips():
+            self._handle_failure('')
             return
         self._give_up(*self._rejected_texts(status))
 

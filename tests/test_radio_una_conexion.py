@@ -755,6 +755,82 @@ def test_un_rechazo_con_el_bufer_sonando_no_martillea(qtbot, emisora, make_servi
     assert "HTTP 403" in svc.current()['error'] and emisora.max_active == 1
 
 
+@pytest.fixture
+def tres_emisoras():
+    """Tres emisoras gratuitas distintas (un Hub cada una), como las radios
+    de serie de «Radios lofi»."""
+    hubs = [icecast.start() for _ in range(3)]
+    yield hubs
+    for hub in hubs:
+        hub.close()
+
+
+def _sin_cuenta(hub):
+    """La URL de una emisora gratuita: sin la ?clave (las de serie no llevan)."""
+    return hub.url().split('?', 1)[0]
+
+
+@pytest.mark.parametrize("mode, text", [
+    ('reject403', "«Lofi 0» rechazó la conexión (HTTP 403): paso a la siguiente"),
+    ('reject429', "«Lofi 0» pide esperar antes de volver a conectar (HTTP 429): "
+                  "paso a la siguiente"),
+    ('reject451', "«Lofi 0» rechazó la conexión (HTTP 451): paso a la siguiente"),
+    ('html200', "«Lofi 0» envió una página web en vez del audio: paso a la siguiente")])
+def test_un_rechazo_de_una_emisora_sin_cuenta_pasa_a_la_siguiente(qtbot, tres_emisoras,
+                                                                 make_service, mode, text):
+    """I4 con emisoras distintas y sin cuenta en la URL (las radios de serie):
+    la 1.ª, llena (Icecast da 403 con el cupo de oyentes lleno), vetada en
+    este país (451), que pide esperar (429) o tras un portal (una página),
+    no apaga la música: una sola petición a ella y suena la 2.ª, sin tocar
+    la 3.ª. Sin el consejo de las radios de pago, que aquí no pinta nada."""
+    a, _b, _c = tres_emisoras
+    a.set_mode(mode)
+    svc = make_service()
+    lid, (first, second, _third) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    assert svc.current()['item_id'] == second and svc.is_playing
+    assert errors == [text]
+    assert [len(h.streams()) for h in tres_emisoras] == [1, 1, 0]
+
+
+def test_si_todas_las_emisoras_sin_cuenta_rechazan_una_peticion_a_cada_una(
+        qtbot, tres_emisoras, make_service):
+    """Saltar tiene el tope de siempre (tantos fallos como items): una
+    petición a cada una y se para, sin dar vueltas."""
+    for hub in tres_emisoras:
+        hub.set_mode('reject403')
+    svc = make_service()
+    lid, (first, _s, _t) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'error' and not svc.is_playing, timeout=WAIT)
+    qtbot.wait(1500)                             # más que ERROR_SKIP_MS y una reconexión
+    assert [len(h.streams()) for h in tres_emisoras] == [1, 1, 1]
+    assert errors[-1] == "No se pudo reproducir ninguna pista de la lista"
+
+
+def test_una_emisora_sin_cuenta_que_ya_sonaba_y_rechaza_para(qtbot, tres_emisoras,
+                                                             make_service):
+    """Si ya sonaba, un rechazo al reconectar tras un corte para, como con
+    cualquier radio: el salto es solo para la que nunca llegó a sonar."""
+    a, b, c = tres_emisoras
+    svc = make_service()
+    lid, (first, _s, _t) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    qtbot.wait(800)
+    a.set_mode('reject403', kill=True)           # corte y, al reconectar, 403
+    qtbot.waitUntil(lambda: svc.state == 'error' and not svc.is_playing, timeout=WAIT)
+    qtbot.wait(1500)
+    assert svc.current()['item_id'] == first and "HTTP 403" in svc.current()['error']
+    assert a.streams()[-1]['status'] == 403
+    assert b.streams() == [] and c.streams() == []
+
+
 def test_un_origen_que_cierra_al_aceptar_un_intento_por_reconexion(qtbot, emisora,
                                                                     make_service):
     """I5/I6: sin 302, cada reintento de MusicService es UNA petición."""

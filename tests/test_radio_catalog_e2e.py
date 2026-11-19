@@ -39,6 +39,10 @@ class _Registro(_Handler):
         with self.server.lock:
             self.server.requests.append(
                 (self.path, (self.headers.get("User-Agent") or '').split('/')[0]))
+        if self.path.split('?', 1)[0] == '/llena':
+            # Un Icecast con el cupo de oyentes lleno: 403 con una página
+            self._send(b"<html><body>Too many listeners</body></html>", "text/html", 403)
+            return
         super().do_GET()
 
 
@@ -160,6 +164,32 @@ def test_una_radio_de_serie_caida_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
         assert [p for p, _ua in _requests(emisora)].count("/caducada") == 1
         # La caída sigue guardada como directo: no se rebaja a pista
         assert svc.items(rc.SEED_LIST_ID)[0]['live'] is True
+    finally:
+        _cerrar(svc, qtbot)
+
+
+def test_una_radio_de_serie_llena_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
+                                                     monkeypatch):
+    """Un 403 de la primera (un Icecast con el cupo de oyentes lleno) es un
+    rechazo, pero su URL no lleva cuenta: como una caída, una sola petición
+    a ella y suena la siguiente. Antes se apagaba toda la música con el
+    consejo de las radios de pago."""
+    catalog = (rc.DefaultRadio('llena', "Llena", f"{emisora.base}/llena",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('viva', "Viva", f"{emisora.base}/live?r=viva",
+                               'audio/mpeg', 128))
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    errors, states = [], []
+    svc.error_occurred.connect(errors.append)
+    svc.state_changed.connect(states.append)
+    try:
+        svc.play()
+        assert svc.current()['title'] == "Llena"
+        qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+        assert svc.current()['title'] == "Viva" and svc.is_playing
+        assert errors == ["«Llena» rechazó la conexión (HTTP 403): paso a la siguiente"]
+        assert 'reconnecting' not in states
+        assert [p for p, _ua in _requests(emisora)].count("/llena") == 1
     finally:
         _cerrar(svc, qtbot)
 
