@@ -701,6 +701,68 @@ def test_pausar_reanudar_siguiente_y_enfoque_sin_solapar(qtbot, emisora, make_se
     assert {r['ua'] for r in recs} == {recs[0]['ua']}    # un solo User-Agent
 
 
+def _sonando(qtbot, svc, hub):
+    """DI.FM sonando por el proxy (prem2, con la clave)."""
+    lid, [iid] = _radio(svc, hub.url('prem2'))
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    return lid
+
+
+@pytest.mark.parametrize("what", ["otro_espejo", "otro_canal", "el_mismo"])
+def test_anadir_un_enlace_con_la_radio_sonando_no_abre_otra_conexion(qtbot, emisora,
+                                                                     make_service, what):
+    """I1: con DI.FM sonando, pegar en Música otro espejo, otro canal o el
+    mismo enlace (la misma clave) no conecta a comprobarlo: esa conexión
+    corta y en paralelo, con otro User-Agent, es el patrón del sondeo ICY
+    que pausaba la cuenta. Entra sin comprobar (vida desconocida) y el proxy
+    decidirá al sonar; el mismo enlace, ni eso."""
+    svc = make_service()
+    lid = _sonando(qtbot, svc, emisora)
+    link = {'otro_espejo': emisora.url('prem4'), 'el_mismo': emisora.url('prem2'),
+            'otro_canal': emisora.url('prem2', channel='chillout')}[what]
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(link, lid)
+    qtbot.wait(300)
+    assert len(emisora.streams()) == 1 and emisora.max_active_by_key[icecast.KEY] == 1
+    if what == 'el_mismo':
+        assert blocker.args == [lid, 0, "Eso ya estaba en la lista"]
+    else:
+        assert blocker.args == [lid, 1, '']
+        added = svc.items(lid)[-1]
+        assert added['source'] == link and added['live'] is None
+    assert svc.state == 'playing'
+
+
+def test_anadir_una_lista_con_la_radio_sonando_la_baja_sin_tocar_el_audio(qtbot, emisora,
+                                                                         make_service):
+    """Una lista (.pls) sí se baja aunque suene la radio: es un texto, no una
+    conexión de audio, y hace falta para sacar sus entradas."""
+    svc = make_service()
+    _sonando(qtbot, svc, emisora)
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(emisora.pls_url(channel='chillout'))
+    _lid, added, error = blocker.args
+    assert (added, error) == (3, '')
+    assert len(emisora.streams()) == 1 and emisora.max_active_by_key[icecast.KEY] == 1
+
+
+def test_en_pausa_anadir_un_enlace_lo_comprueba_sin_solaparse(qtbot, emisora, make_service):
+    """En pausa el proxy ya cortó: el enlace se comprueba como siempre (sus
+    cabeceras dicen que es una radio) y sin coincidir con otra conexión."""
+    svc = make_service()
+    lid = _sonando(qtbot, svc, emisora)
+    svc.pause()
+    qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=2000)
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(emisora.url('prem4'), lid)
+    assert blocker.args == [lid, 1, '']
+    assert svc.items(lid)[-1]['live'] is True               # comprobado: icy-*
+    recs = emisora.streams()
+    assert len(recs) == 2 and recs[-1]['ua'] == "PomoGrowth/9"
+    assert _sin_solapes(recs) and emisora.max_active_by_key[icecast.KEY] == 1
+
+
 @pytest.mark.parametrize("mode, text", [
     ('reject403', "La emisora rechazó la conexión (HTTP 403). Si es una radio de pago, "
                   "comprueba que no esté sonando en otro dispositivo y vuelve a darle a "

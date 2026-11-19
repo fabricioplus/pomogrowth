@@ -33,6 +33,7 @@ Contrato con la interfaz (resumen; detalle en cada método):
   desde la primera conexión, con precarga 0 (la latencia de ir directo), y
   el proxy es lo único que habla con la emisora: los títulos ICY, el nombre,
   los kbps y el tipo llegan por su señal metadata, de esa misma conexión.
+  Mientras suena, añadir un enlace tampoco conecta a comprobarlo (add_link).
   Con un item de vida desconocida (live None, como las entradas de un .pls)
   deciden sus cabeceras: una pista (Content-Length o Accept-Ranges sin
   icy-*) va directa por 302 y se guarda live False. Si el proxy no puede
@@ -93,9 +94,9 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer
 
 from core.music_library import (EXT_MIME, HLS_EXTS, LOFI_LIST_ID, MAX_ITEMS_PER_LIST,
-                                REPEAT_MODES, Entry, MusicLibrary, classify_link, codec_name,
-                                scan_audio_folder, source_ext, title_from_source,
-                                update_item_fields)
+                                PLAYLIST_EXTS, REPEAT_MODES, Entry, MusicLibrary,
+                                classify_link, codec_name, scan_audio_folder, source_ext,
+                                title_from_source, update_item_fields)
 from services.music_resolver import (MSG_HLS_UNSAFE, Deadline, ResolveResult,
                                      local_hls_file_ok, resolve_link)
 from services.stream_buffer import PREFILL_GRACE_S, ConnectionBudget, StreamBuffer
@@ -660,7 +661,20 @@ class MusicService(QObject):
         añadidos, error). Sin list_id: una playlist crea su propia lista; un
         audio suelto va a la lista actual o a «Mis enlaces». Va en un hilo
         propio con plazo total (2×LINK_TIMEOUT_S): un servidor lento no
-        ocupa los hilos de Asana ni retiene el cierre de la app."""
+        ocupa los hilos de Asana ni retiene el cierre de la app.
+
+        Con una emisora sonando o a punto (_station_busy), un enlace http(s)
+        que no es una lista por su extensión se añade sin comprobarlo:
+        comprobarlo es conectar a la emisora, y una radio de pago (DI.FM…)
+        que vea otra conexión con la misma cuenta (otro canal, un espejo, el
+        mismo enlace) pausa la cuenta. Entra de vida desconocida y el proxy
+        decide al sonar (directo o pista, o el error). Una lista sí se baja:
+        es un texto, no audio."""
+        unprobed = self._unprobed(text) if self._station_busy() else None
+        if unprobed is not None:
+            # Después de volver, como cuando se resuelve en el hilo
+            QTimer.singleShot(0, self, lambda: self._on_link_done(unprobed, list_id))
+            return
         from services.workers import run_in_thread
         timeout = self.LINK_TIMEOUT_S
         deadline = Deadline(max(timeout, 1) * 2)
@@ -670,6 +684,26 @@ class MusicService(QObject):
                       on_error=lambda _e: self._on_link_done(
                           ResolveResult(error="No se pudo abrir ese enlace"), list_id,
                           deadline))
+
+    def _station_busy(self) -> bool:
+        """¿Hay, o está a punto de haber, una conexión con una emisora por
+        enlace? La música encendida (sonando, cargando, reconectando,
+        saltando tras un fallo o esperando al enfoque) con un enlace que
+        puede ser un directo, el que pasaría por el proxy. En pausa o parada
+        el proxy ya cortó la conexión."""
+        return self._want and self._proxy_eligible(self._current_item())
+
+    @staticmethod
+    def _unprobed(text: str) -> Optional[ResolveResult]:
+        """Un enlace http(s) que no es una lista (.pls, .m3u, .m3u8, .xspf,
+        .hls), como entrada sin comprobar (live None, el título de la URL);
+        None si hay que resolverlo: una lista, un archivo o algo que no vale
+        (resolve_link da el error sin red)."""
+        info = classify_link(text)
+        if info.kind != 'url' or source_ext(info.normalized) in PLAYLIST_EXTS | HLS_EXTS:
+            return None
+        url = info.normalized
+        return ResolveResult(entries=[Entry(url, title_from_source(url))])
 
     def _on_link_done(self, res: ResolveResult, list_id: Optional[str],
                       deadline: Optional[Deadline] = None) -> None:
