@@ -11,8 +11,9 @@ redimensionar la ventana. Las ventanas que posee (sus diálogos y avisos) van
 con ella y siguen encima: con SWP_NOOWNERZORDER la dueña subía por encima de
 su propio modal y quedaba bloqueada con el modal escondido detrás.
 keep_topmost() junta las dos y deja una línea en el log cada vez que hubo
-que reponerlo. Fuera de Windows o sin ventanas nativas (Qt offscreen en los
-tests) no hacen nada.
+que reponerlo, comprobado (Windows puede aceptar la llamada sin aplicarla:
+entonces lo dice una vez). Fuera de Windows o sin ventanas nativas (Qt
+offscreen en los tests) no hacen nada.
 """
 import ctypes
 import logging
@@ -162,17 +163,34 @@ def set_topmost(hwnd, on: bool) -> bool:
         return False
 
 
+_refused = set()  # `where` de las ventanas a las que Windows no dejó reponerlo
+
+
 def keep_topmost(hwnd, where: str, force: bool = False) -> bool:
     """Repone el «encima de todo» de una ventana que debe tenerlo. Si ya lo
     tiene, no la toca (no compite con otras ventanas siempre visibles), salvo
     con `force` (al mostrarla o restaurarla, cuando va a ir delante de todos
     modos). Devuelve True, y deja una línea en el log, si lo había perdido y
-    se repuso; `where` dice cuál («principal», «compacta»…)."""
+    se repuso; `where` dice cuál («principal», «compacta»…).
+
+    SetWindowPos puede devolver TRUE sin aplicarlo (según qué ventana esté en
+    primer plano, Windows no deja subir de banda): se vuelve a mirar. Si no
+    quedó, una sola línea que lo dice por ventana (el tick lo reintenta cada
+    2 s y el log no rota) y False; «repuesto», cuando por fin lo esté."""
     state = is_topmost(hwnd)
+    if state:
+        _refused.discard(where)
     if state is None or (state and not force):
         return False
     if not set_topmost(hwnd, True) or state:
         return False
+    if not is_topmost(hwnd):
+        if where not in _refused:
+            _refused.add(where)
+            logging.info("Siempre visible: la ventana %s perdió el «encima de todo» y "
+                         "Windows no dejó reponerlo; se sigue intentando", where)
+        return False
+    _refused.discard(where)
     logging.info("Siempre visible: la ventana %s había perdido el «encima de todo»; "
                  "repuesto", where)
     return True

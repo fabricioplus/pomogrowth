@@ -278,6 +278,41 @@ def test_el_tick_repone_el_encima_de_todo_y_lo_apunta(ctrl, native, caplog):
     assert native.calls == [(_hwnd(win), True)] and not caplog.records
 
 
+def test_si_windows_no_deja_reponerlo_no_dice_repuesto(ctrl, native, caplog, monkeypatch):
+    """SetWindowPos puede contestar TRUE sin aplicar el «encima de todo»
+    (según la ventana en primer plano). El log no puede decir «repuesto»
+    justo cuando no lo está: lo dice una vez, sin repetirlo en cada tick (el
+    log no rota), y «repuesto» cuando por fin lo esté."""
+    from utils import win_native
+    monkeypatch.setattr(win_native, "_refused", set())
+    win = ctrl.window
+    native.top[_hwnd(win)] = False
+    refusing = [True]
+
+    def set_topmost(hwnd, on):                     # acepta, y aplica o no
+        native.calls.append((int(hwnd), bool(on)))
+        if not refusing[0]:
+            native.top[int(hwnd)] = bool(on)
+        return True
+    monkeypatch.setattr(win_native, "set_topmost", set_topmost)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if "principal" in r.getMessage()]
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            ctrl._keep_on_top()
+        assert win_native.keep_topmost(_hwnd(win), "principal") is False
+    assert len(native.calls) == 4                  # se sigue intentando
+    assert len(lines()) == 1 and "no dejó reponerlo" in lines()[0]
+    caplog.clear()
+    refusing[0] = False
+    with caplog.at_level(logging.INFO):
+        ctrl._keep_on_top()
+        ctrl._keep_on_top()                        # ya lo tiene: ni se toca
+    assert len(lines()) == 1 and lines()[0].endswith("repuesto")
+    assert len(native.calls) == 5
+
+
 def test_el_tick_lo_mira_cada_dos_segundos(ctrl, monkeypatch):
     calls = []
     monkeypatch.setattr(ctrl, "_keep_on_top", lambda: calls.append(1))
@@ -396,7 +431,36 @@ def _user32():
     user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
     user32.GetWindow.restype = wintypes.HWND
     user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, wintypes.UINT)
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
     return user32
+
+
+def _windows_lets_topmost(user32) -> bool:
+    """¿Deja Windows ahora mismo poner WS_EX_TOPMOST a una ventana de este
+    proceso? Con ciertas ventanas en primer plano (un navegador…),
+    SetWindowPos contesta TRUE sin aplicarlo: depende del escritorio, no del
+    código. Se mira con una ventana de control, sin pasar por win_native."""
+    gwl_exstyle, ws_ex_topmost, hwnd_topmost = -20, 0x8, -1
+    flags = 0x0001 | 0x0002 | 0x0010               # NOSIZE | NOMOVE | NOACTIVATE
+    hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth control", 0, 70, 80, 10, 10,
+                                  None, None, None, None)
+    if not hwnd:
+        return False
+    try:
+        user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, flags)
+        return bool(user32.GetWindowLongW(hwnd, gwl_exstyle) & ws_ex_topmost)
+    finally:
+        user32.DestroyWindow(hwnd)
+
+
+def _skip_if_windows_refuses(user32) -> None:
+    if not _windows_lets_topmost(user32):
+        pytest.skip("Windows no deja poner el «encima de todo» ahora mismo (depende "
+                    "de la ventana en primer plano, no del código)")
 
 
 def _window_rect(user32, hwnd):
@@ -412,28 +476,37 @@ def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
     """Una ventana Win32 real, oculta y sin activar (nada se ve), fuera del
     (0, 0): poner y quitar el «encima de todo» sin moverla ni
     redimensionarla, y reponerlo con su línea en el log (y sin ella si no lo
-    había perdido, aunque se fuerce)."""
+    había perdido, aunque se fuerce). Si Windows no deja subir de banda en
+    ese momento (lo mira una ventana de control antes y, si algo falla,
+    otra vez), se salta: es el escritorio, no el código."""
     from utils import win_native
     monkeypatch.setattr(win_native, "_native_windows", lambda: True)
+    monkeypatch.setattr(win_native, "_refused", set())
     user32 = _user32()
+    _skip_if_windows_refuses(user32)
     hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth prueba", 0, 50, 60, 10, 10,
                                   None, None, None, None)
     assert hwnd
     try:
-        rect = _window_rect(user32, hwnd)
-        assert rect[:2] == (50, 60)
-        assert win_native.is_topmost(hwnd) is False
-        assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
-        assert _window_rect(user32, hwnd) == rect    # ni movida ni redimensionada
-        assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
-        with caplog.at_level(logging.INFO):
-            assert win_native.keep_topmost(hwnd, "prueba") is True
-            assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
-            # Forzado (fade_show, la compacta al mostrarse, «Guardar») sobre una
-            # que no lo perdió: ni una línea, o el log no distinguiría una pérdida
-            assert win_native.keep_topmost(hwnd, "prueba", force=True) is False
-        assert win_native.is_topmost(hwnd) is True
-        assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        try:
+            rect = _window_rect(user32, hwnd)
+            assert rect[:2] == (50, 60)
+            assert win_native.is_topmost(hwnd) is False
+            assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
+            assert _window_rect(user32, hwnd) == rect    # ni movida ni redimensionada
+            assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
+            with caplog.at_level(logging.INFO):
+                assert win_native.keep_topmost(hwnd, "prueba") is True
+                assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
+                # Forzado (fade_show, la compacta al mostrarse, «Guardar») sobre
+                # una que no lo perdió: ni una línea, o el log no distinguiría
+                # una pérdida
+                assert win_native.keep_topmost(hwnd, "prueba", force=True) is False
+            assert win_native.is_topmost(hwnd) is True
+            assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        except AssertionError:
+            _skip_if_windows_refuses(user32)       # cambió el primer plano a mitad
+            raise
         assert _window_rect(user32, hwnd) == rect
         assert not user32.IsWindowVisible(hwnd)    # nunca se mostró
     finally:
@@ -460,6 +533,8 @@ def test_reponer_el_encima_de_todo_deja_sus_modales_encima(monkeypatch):
     from utils import win_native
     monkeypatch.setattr(win_native, "_native_windows", lambda: True)
     user32 = _user32()
+    # Si Windows no deja subir de banda ahora, pasaría sin comprobar nada
+    _skip_if_windows_refuses(user32)
     GW_HWNDPREV = 3
     WS_POPUP, WS_EX_TOPMOST, WS_EX_NOACTIVATE = 0x80000000, 0x8, 0x08000000
 
