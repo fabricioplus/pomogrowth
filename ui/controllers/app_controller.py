@@ -896,6 +896,9 @@ class AppController(QObject):
                 self.timer_panel.set_active_task(None)
             # Mantener el filtro/orden actual (por defecto: Pendientes + Fecha)
             self.refresh_task_list()
+            # La compacta también (con el timer parado el tick no la refresca):
+            # si no, seguía con la tarea soltada, o con su nombre de antes
+            self._sync_compact()
             # En el arranque con splash la principal aún no es visible: el
             # toast saldría flotando solo y pisaría a la bienvenida
             if self.window.isVisible():

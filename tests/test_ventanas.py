@@ -230,6 +230,29 @@ def test_compacta_durante_el_desvanecido_de_minimizar(ctrl, qtbot):
     assert not win.isMinimized() and not ctrl.compact_window.isVisible()
 
 
+def test_la_compacta_suelta_la_tarea_que_suelta_un_sync(ctrl, monkeypatch):
+    """Timer parado y la compacta a la vista: un sync en segundo plano (el
+    reintento, el diferido tras un envío, el del arranque) trae la tarea
+    activa completada en Asana y se suelta. La compacta lo dice al momento:
+    seguía con su nombre (parado, el tick no la refresca) y su ▶ contestaba
+    «Sin tarea activa»."""
+    from ui.dialogs import branded_dialogs as dialogs
+    asked = []
+    monkeypatch.setattr(dialogs, "info", lambda _parent, title, *a, **k: asked.append(title))
+    ctrl.select_task(ID1)
+    ctrl.show_compact()
+    cw = ctrl.compact_window
+    assert cw._task_name == 'Informe'
+    for task in ctrl.data_handler.data['tasks']:
+        task['completed'] = True                   # cerrada en Asana
+    ctrl.asana.finished.emit(1)
+    assert ctrl.model.active_task_id is None
+    assert cw._task_name is None
+    assert cw.task_label._full == "Ninguna tarea seleccionada"
+    assert asked == []
+    ctrl.show_normal()
+
+
 def test_minimizar_sigue_minimizando(ctrl, qtbot):
     """El guardia del final del desvanecido no estorba al caso normal."""
     win = ctrl.window
