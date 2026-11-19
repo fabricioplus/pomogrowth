@@ -18,9 +18,12 @@ Diagnóstico de cierres y cuelgues (lo que el log normal no ve):
   faulthandler.dump_traceback_later. Si el hilo de la interfaz se queda más
   de ~5 s sin volver al bucle de eventos, el temporizador nativo vuelca las
   pilas en ese mismo archivo y, cuando el hilo se recupera, una línea en el
-  log de la sesión lo dice: solo si de verdad pasaron esos ~5 s (que el
-  archivo crezca no basta: lo de arriba también lo hace crecer). Mientras
-  todo va bien no escribe nada.
+  log de la sesión lo dice: solo si lo añadido trae ese volcado (su cabecera
+  «Timeout (…)!») y de verdad pasaron esos ~5 s. Que el archivo crezca no
+  basta (lo de arriba también lo hace crecer), y el hueco se mide con un
+  reloj que no cuenta la suspensión del equipo: con time.monotonic, al
+  despertar de una hora suspendido el primer latido veía un hueco de una
+  hora. Mientras todo va bien no escribe nada.
 scrub() quita de un texto lo que no debe acabar en un log (enlaces, rutas y
 títulos entre comillas angulares).
 """
@@ -32,13 +35,15 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 FAULT_LOG_NAME = "pomogrowth_fallos.log"
 FAULT_LOG_MAX_BYTES = 1_000_000
 UI_BLOCK_TIMEOUT_S = 5.0
 UI_WATCHDOG_INTERVAL_MS = 1000
 _fault_file = None  # abierto toda la sesión: faulthandler escribe en su descriptor
+# La cabecera con que dump_traceback_later empieza su volcado: «Timeout (0:00:05)!»
+_WATCHDOG_DUMP = re.compile(rb"(?m)^Timeout \(")
 
 
 def log_dir() -> Path:
@@ -124,6 +129,32 @@ def fault_log_file():
     return _fault_file
 
 
+def _awake_clock() -> Callable[[], float]:
+    """Un reloj en segundos que no cuenta la suspensión del equipo. En
+    Windows, QueryUnbiasedInterruptTime: time.monotonic es ahí
+    QueryPerformanceCounter, que sí la cuenta, y el vigía tomaba una hora
+    suspendido por una hora sin latir (y un bloqueo de verdad al despertar,
+    por uno de una hora). Fuera de Windows (CLOCK_MONOTONIC ya no la cuenta)
+    o si falla, time.monotonic."""
+    if sys.platform != "win32":
+        return time.monotonic
+    try:
+        import ctypes
+        query = ctypes.WinDLL("kernel32").QueryUnbiasedInterruptTime
+        query.restype = ctypes.c_int
+        query.argtypes = (ctypes.POINTER(ctypes.c_ulonglong),)
+        if not query(ctypes.byref(ctypes.c_ulonglong())):
+            return time.monotonic
+    except (OSError, AttributeError):
+        return time.monotonic
+
+    def clock() -> float:
+        value = ctypes.c_ulonglong()
+        query(ctypes.byref(value))
+        return value.value / 1e7       # en unidades de 100 ns
+    return clock
+
+
 class _UiWatchdog:
     """Ver start_ui_watchdog. `clock` se puede cambiar en los tests."""
 
@@ -131,7 +162,7 @@ class _UiWatchdog:
         from PySide6.QtCore import QTimer
         self.handle = handle
         self.timeout_s = float(timeout_s)
-        self.clock = time.monotonic
+        self.clock = _awake_clock()
         self._last = None
         self._size = self._file_size()
         self._timer = QTimer(parent)
@@ -165,15 +196,28 @@ class _UiWatchdog:
         gap = now - (self._last if self._last is not None else now)
         self._last = now
         size = self._file_size()
-        if size > self._size and gap >= self.timeout_s:
+        if size > self._size and gap >= self.timeout_s and self._dumped(self._size, size):
             # El temporizador nativo saltó: el hilo estuvo bloqueado y sus
-            # pilas ya están en el archivo de fallos. Sin ese hueco, lo que
-            # creció fue otra cosa (una excepción manejada que faulthandler
-            # apunta igual, otro proceso): no hubo bloqueo que avisar
+            # pilas ya están en el archivo de fallos. Si lo que creció es otra
+            # cosa (una excepción manejada que faulthandler apunta igual, otro
+            # proceso), no hubo bloqueo que avisar, aunque el hueco sea largo
             logging.warning("El hilo de la interfaz estuvo bloqueado ~%.1f s; "
                             "sus pilas están en %s", gap, FAULT_LOG_NAME)
         self._size = size
         self._arm()
+
+    def _dumped(self, start: int, end: int) -> bool:
+        """¿Trae lo añadido al archivo entre `start` y `end` un volcado del
+        vigía (la cabecera de dump_traceback_later, en cualquier línea:
+        puede llegar detrás de otra cosa)? Se lee aparte, con tope, porque
+        faulthandler escribe en el descriptor. Si no se puede leer, no."""
+        try:
+            with open(self.handle.name, "rb") as added:
+                added.seek(start)
+                text = added.read(min(end - start, FAULT_LOG_MAX_BYTES))
+        except (OSError, AttributeError, TypeError, ValueError):
+            return False
+        return bool(_WATCHDOG_DUMP.search(text))
 
 
 def start_ui_watchdog(handle, parent=None, timeout_s: float = UI_BLOCK_TIMEOUT_S,

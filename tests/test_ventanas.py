@@ -1419,6 +1419,56 @@ def test_el_vigia_no_avisa_de_un_bloqueo_que_no_hubo(tmp_path, qtbot, caplog):
         handle.close()
 
 
+def test_una_suspension_no_es_un_bloqueo(tmp_path, qtbot, caplog):
+    """El equipo se suspende una hora con la app abierta y, al despertar, una
+    DLL maneja una excepción que faulthandler apunta igual (la app sigue).
+    time.monotonic (QueryPerformanceCounter) cuenta la suspensión: el primer
+    latido veía una hora de hueco y el archivo más grande, y avisaba de un
+    bloqueo de ~3600 s sin pilas del vigía. Solo cuenta un volcado suyo
+    («Timeout (…)!»). La suspensión se simula con el reloj del vigía y su
+    temporizador parado."""
+    import faulthandler
+    from utils import logging_setup
+    path = tmp_path / "fallos.log"
+    handle = open(path, "a", encoding="utf-8")
+    now = [1000.0]
+    dog = logging_setup._UiWatchdog(handle, 5.0, 1000)
+    dog.clock = lambda: now[0]
+    dog.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            now[0] += 1.0
+            dog._beat()                            # todo bien antes de suspender
+            dog._timer.stop()                      # suspendido: nada late
+            now[0] += 3600.0
+            with open(path, "a", encoding="utf-8") as other:   # al despertar
+                other.write("Windows fatal exception: code 0x80010108\n\n"
+                            "Current thread 0x0001 (most recent call first):\n"
+                            '  File "x.py", line 1 in <module>\n')
+            now[0] += 0.2
+            dog._beat()                            # el primer latido al despertar
+        assert not [r for r in caplog.records if "bloqueado" in r.getMessage()]
+    finally:
+        dog.stop()
+        faulthandler.cancel_dump_traceback_later()
+        handle.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="QueryUnbiasedInterruptTime es de Windows")
+def test_el_reloj_del_vigia_no_cuenta_la_suspension():
+    """El hueco se mide con QueryUnbiasedInterruptTime, que no cuenta la
+    suspensión (time.monotonic sí): un bloqueo de verdad al despertar dice
+    lo que duró él, no la siesta. Despierto, avanza como time.monotonic."""
+    from utils import logging_setup
+    clock = logging_setup._awake_clock()
+    assert clock is not time.monotonic
+    start, mono = clock(), time.monotonic()
+    time.sleep(0.3)
+    elapsed = clock() - start
+    assert 0.2 < elapsed < 1.5
+    assert abs(elapsed - (time.monotonic() - mono)) < 0.1
+
+
 def test_el_vigia_vuelca_las_pilas_si_el_hilo_se_bloquea(tmp_path, qtbot, caplog):
     import faulthandler
     from utils import logging_setup
