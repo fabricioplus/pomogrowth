@@ -96,7 +96,7 @@ except ImportError:
 
 from core.asana_errors import AsanaFetchError, error_from_response
 from core.config import Config
-from core.music_library import default_music, normalize_music
+from core.music_library import clean_seeds, default_music, normalize_music
 from core.radio_catalog import apply_default_radios, declined_radios
 from core.ambient_catalog import normalize_mix as normalize_ambient_mix
 from core.ambient_catalog import clamp_volume
@@ -153,7 +153,7 @@ class DataHandler:
             default_data['settings']['onboarding_seen'] = False
             # …y las radios de serie. Sin guardar: el primer guardado las
             # persiste y, hasta entonces, cada arranque las siembra igual
-            self._seed_default_radios(default_data['music'])
+            self._sync_radio_seeds(default_data)
             return default_data
         # Carga segura: si el archivo está corrupto se preserva una copia y se
         # intenta el .bak; el error queda en self.load_error para avisar en UI.
@@ -278,7 +278,7 @@ class DataHandler:
             # actualiza): al final de todo, con el archivo ya validado, para
             # que una siembra nunca acompañe a un load_error. Se guarda al
             # arrancar (__init__) o al acabar import_data
-            if self._seed_default_radios(data['music']):
+            if self._sync_radio_seeds(data):
                 self._migrated_on_load = True
             return data
         except (AttributeError, TypeError, KeyError, ValueError, OverflowError) as e:
@@ -964,9 +964,15 @@ class DataHandler:
         # válida en el archivo, se conserva la actual (con su marca de las
         # radios de serie ya ofrecidas)
         music = imported.get('music')
+        settings = imported.get('settings')
+        # La marca puede venir en cualquiera de los dos sitios: un backup que
+        # exportó la 1.0.1 tras usar esta trae solo la de settings
+        marked = ((isinstance(music, dict) and isinstance(music.get('seeds'), list))
+                  or (isinstance(settings, dict)
+                      and isinstance(settings.get('radio_seeds'), list)))
         if not self._has_valid_music(music):
             imported['music'] = copy.deepcopy(self.data.get('music') or default_music())
-        elif not isinstance(music.get('seeds'), list):
+        elif not marked:
             # Música de antes de las radios de serie: hereda la marca de las
             # que el usuario quitó aquí, para que _load no se las devuelva
             imported['music'] = {**music, 'seeds': self._declined_radios()}
@@ -1504,6 +1510,28 @@ class DataHandler:
         except Exception as e:
             print(f"Advertencia: no se pudieron añadir las radios de serie: {e}")
             return False
+
+    def _sync_radio_seeds(self, data: Dict[str, Any]) -> bool:
+        """Las radios de serie, con su marca en dos sitios: music['seeds'] y
+        settings['radio_seeds']. Una versión sin radios de serie (la 1.0.1,
+        un instalador de prueba de antes) abierta sobre estos datos reescribe
+        data['music'] con su esquema y pierde 'seeds', pero conserva las
+        claves de settings que no conoce. Así, al volver aquí, lo que el
+        usuario quitó no vuelve: se juntan las dos (la unión, en orden), se
+        siembra lo que falte y las dos quedan iguales. True si cambió algo
+        (hay que guardar). Con la siembra apagada no toca nada."""
+        if not self.SEED_DEFAULT_RADIOS:
+            return False
+        music, settings = data['music'], data['settings']
+        before = list(music.get('seeds') or [])
+        music['seeds'] = clean_seeds(before + clean_seeds(settings.get('radio_seeds')))
+        changed = music['seeds'] != before
+        if self._seed_default_radios(music):
+            changed = True
+        if settings.get('radio_seeds') != music['seeds']:
+            settings['radio_seeds'] = list(music['seeds'])
+            changed = True
+        return changed
 
     def _declined_radios(self) -> List[str]:
         """Las radios de serie que el usuario quitó de la biblioteca actual

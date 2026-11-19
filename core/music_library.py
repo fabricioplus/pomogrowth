@@ -554,6 +554,16 @@ def playlist_name(text: str, fmt: Optional[str]) -> str:
 
 
 # --------------------------------------------------------------- validación
+def clean_seeds(raw: Any) -> List[str]:
+    """Una marca de lo ofrecido de serie (music['seeds'] o su copia,
+    settings['radio_seeds']) saneada: ids de texto válidos, sin repetir, en
+    su orden y como mucho MAX_SEEDS. Lo que no es una lista da []."""
+    if not isinstance(raw, list):
+        return []
+    return list(dict.fromkeys(
+        x for x in raw if isinstance(x, str) and 0 < len(x) <= _MAX_ID))[:MAX_SEEDS]
+
+
 def default_music() -> Dict[str, Any]:
     return {'lists': [], 'current': {'list': None, 'item': None},
             'volume': DEFAULT_VOLUME, 'shuffle': False, 'repeat': 'all',
@@ -701,8 +711,7 @@ def normalize_music(raw: Any) -> Dict[str, Any]:
     # el primer guardado y lo borrado volvería al abrir
     seeds = raw.get('seeds')
     if isinstance(seeds, list):
-        out['seeds'] = list(dict.fromkeys(
-            x for x in seeds if isinstance(x, str) and 0 < len(x) <= _MAX_ID))[:MAX_SEEDS]
+        out['seeds'] = clean_seeds(seeds)
     cur = raw.get('current')
     if isinstance(cur, dict):
         c_list, c_item = cur.get('list'), cur.get('item')

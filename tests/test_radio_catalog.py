@@ -261,6 +261,85 @@ def test_un_backup_anterior_no_resucita_las_que_quito(tmp_path, sembrar, monkeyp
     assert [t['name'] for t in dh.data['tasks']] == ["Del backup"]
 
 
+def _saved(path):
+    return json.loads(path.read_text(encoding='utf-8'))
+
+
+def _como_guarda_la_101(path):
+    """Lo que hace con estos datos la 1.0.1 (o un instalador de prueba de
+    antes de las radios) en su primer guardado: data['music'] pasa por su
+    esquema, que no conoce 'seeds', y las claves de settings que no conoce
+    se quedan (sus save_settings parten de load_settings)."""
+    data = _saved(path)
+    data['music'].pop('seeds', None)
+    path.write_text(json.dumps(data), encoding='utf-8')
+
+
+@pytest.mark.parametrize("what", ["radio", "lista"])
+def test_volver_a_la_101_y_a_esta_no_resucita_lo_quitado(tmp_path, sembrar, what):
+    """Esta siembra → el usuario quita una radio (o la lista entera) →
+    vuelve a la 1.0.1, que pierde music['seeds'] al guardar → abre otra vez
+    esta. Lo quitado no vuelve: la copia de la marca en settings sobrevive a
+    la 1.0.1, y el archivo vuelve a llevarla en los dos sitios."""
+    path = tmp_path / "d.json"
+    dh = DataHandler(path)
+    lib = MusicLibrary(dh.get_music())
+    if what == "radio":
+        lib.remove_item(rc.SEED_LIST_ID, _seed_list(lib.data)['items'][0]['id'])   # «Uno»
+    else:
+        lib.delete_list(rc.SEED_LIST_ID)
+    dh.save_music(lib.to_dict())
+    _como_guarda_la_101(path)
+    music = DataHandler(path).get_music()
+    assert _seed_titles(music) == (["Dos"] if what == "radio" else [])
+    assert len(music['lists']) == (1 if what == "radio" else 0)
+    saved = _saved(path)
+    assert saved['music']['seeds'] == saved['settings']['radio_seeds'] == ['r1', 'r2']
+
+
+def test_quien_ya_tenia_la_marca_recibe_su_copia_al_arrancar(tmp_path, sembrar):
+    """Datos de esta versión de antes de la copia (marca solo en la música):
+    al arrancar se escribe la de settings, para que volver a la 1.0.1 no la
+    pierda."""
+    path = tmp_path / "d.json"
+    _write(path, {'lists': [], 'seeds': ['r1', 'r2']}, settings={'user_name': "Ana"})
+    DataHandler(path)
+    saved = _saved(path)
+    assert saved['settings']['radio_seeds'] == ['r1', 'r2']
+    assert saved['settings']['user_name'] == "Ana" and saved['music']['lists'] == []
+
+
+def test_un_backup_con_la_marca_solo_en_settings_se_respeta(tmp_path, sembrar):
+    """Un backup que exportó la 1.0.1 tras pasar por esta (música sin 'seeds'
+    y la copia en settings) no es «de antes de las radios»: su marca se
+    respeta y lo que quitó no vuelve. La marca de la instalación actual no
+    se le pasa (test_un_backup_anterior_no_resucita_las_que_quito)."""
+    path = tmp_path / "d.json"
+    dh = DataHandler(path)
+    dh.import_data({'tasks': [], 'settings': {'radio_seeds': ['r1', 'r2']},
+                    'music': {'lists': [{'id': 'abc', 'name': "Mías", 'items': []}]}})
+    for music in (dh.get_music(), _saved_music(path)):
+        assert [x['name'] for x in music['lists']] == ["Mías"]
+        assert music['seeds'] == ['r1', 'r2']
+    assert _saved(path)['settings']['radio_seeds'] == ['r1', 'r2']
+
+
+@pytest.mark.parametrize("raw, titles", [
+    ("r1", ["Uno", "Dos"]), (7, ["Uno", "Dos"]), ({'r1': 1}, ["Uno", "Dos"]),
+    (['r1', 7, '', 'x' * 65, 'r1'], ["Dos"]),
+    ([f"s{n}" for n in range(ml.MAX_SEEDS + 10)], [])],
+    ids=["texto", "numero", "dict", "mezcla", "demasiados"])
+def test_una_copia_de_la_marca_rota_no_rompe_la_carga(tmp_path, sembrar, raw, titles):
+    path = tmp_path / "d.json"
+    _write(path, {'lists': []}, settings={'user_name': "Ana", 'radio_seeds': raw})
+    dh = DataHandler(path)
+    assert dh.load_error is None and dh.data['settings']['user_name'] == "Ana"
+    assert _seed_titles(dh.get_music()) == titles
+    saved = _saved(path)
+    assert saved['settings']['radio_seeds'] == saved['music']['seeds']
+    assert len(saved['music']['seeds']) <= ml.MAX_SEEDS
+
+
 def test_declined_radios(monkeypatch):
     music = normalize_music({'seeds': ['r1', 'r2', 'vieja'], 'lists': [
         {'id': 'a', 'name': "A", 'items': [
