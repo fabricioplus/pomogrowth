@@ -384,13 +384,19 @@ def test_otros_errores_contestan_502_sin_302(qtbot, emisora, proxy, mode, kind):
 
 def test_icy_200_ok_va_directo_por_302_tras_cerrar(qtbot, emisora, proxy):
     """I5: SHOUTcast v1 («ICY 200 OK») no se puede leer con requests: 302,
-    con la conexión del lector ya cerrada."""
+    con la conexión del lector ya cerrada. Se mira cuándo la cerró el lector
+    (el falso ve el cierre en ~10 ms): con solo esperar a que no quedara
+    ninguna abierta, el propio falso la cerraba a los 2 s y un proxy que la
+    cerrara tarde (dos conexiones a la vez), o nunca, pasaba igual."""
     emisora.set_mode('icy_v1')
     url = proxy.open(emisora.url(), 0, known_live=True)
     resp = requests.get(url, allow_redirects=False, timeout=10)
+    t_302 = emisora.now()
     assert resp.status_code == 302 and resp.headers['Location'] == emisora.url()
     qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=2000)
-    assert len(emisora.streams()) == 1
+    [rec] = emisora.streams()
+    assert rec['end'] == 'client_closed'
+    assert rec['t_close'] is not None and rec['t_close'] <= t_302 + 0.3
 
 
 def test_sin_precarga_un_corte_acaba_la_sesion_sin_reconectar(qtbot, emisora, proxy):
@@ -748,6 +754,68 @@ def test_pausar_reanudar_siguiente_y_enfoque_sin_solapar(qtbot, emisora, make_se
     assert {r['ua'] for r in recs} == {recs[0]['ua']}    # un solo User-Agent
 
 
+def _sonando(qtbot, svc, hub):
+    """DI.FM sonando por el proxy (prem2, con la clave)."""
+    lid, [iid] = _radio(svc, hub.url('prem2'))
+    svc.play(lid, iid)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    return lid
+
+
+@pytest.mark.parametrize("what", ["otro_espejo", "otro_canal", "el_mismo"])
+def test_anadir_un_enlace_con_la_radio_sonando_no_abre_otra_conexion(qtbot, emisora,
+                                                                     make_service, what):
+    """I1: con DI.FM sonando, pegar en Música otro espejo, otro canal o el
+    mismo enlace (la misma clave) no conecta a comprobarlo: esa conexión
+    corta y en paralelo, con otro User-Agent, es el patrón del sondeo ICY
+    que pausaba la cuenta. Entra sin comprobar (vida desconocida) y el proxy
+    decidirá al sonar; el mismo enlace, ni eso."""
+    svc = make_service()
+    lid = _sonando(qtbot, svc, emisora)
+    link = {'otro_espejo': emisora.url('prem4'), 'el_mismo': emisora.url('prem2'),
+            'otro_canal': emisora.url('prem2', channel='chillout')}[what]
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(link, lid)
+    qtbot.wait(300)
+    assert len(emisora.streams()) == 1 and emisora.max_active_by_key[icecast.KEY] == 1
+    if what == 'el_mismo':
+        assert blocker.args == [lid, 0, "Eso ya estaba en la lista"]
+    else:
+        assert blocker.args == [lid, 1, '']
+        added = svc.items(lid)[-1]
+        assert added['source'] == link and added['live'] is None
+    assert svc.state == 'playing'
+
+
+def test_anadir_una_lista_con_la_radio_sonando_la_baja_sin_tocar_el_audio(qtbot, emisora,
+                                                                         make_service):
+    """Una lista (.pls) sí se baja aunque suene la radio: es un texto, no una
+    conexión de audio, y hace falta para sacar sus entradas."""
+    svc = make_service()
+    _sonando(qtbot, svc, emisora)
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(emisora.pls_url(channel='chillout'))
+    _lid, added, error = blocker.args
+    assert (added, error) == (3, '')
+    assert len(emisora.streams()) == 1 and emisora.max_active_by_key[icecast.KEY] == 1
+
+
+def test_en_pausa_anadir_un_enlace_lo_comprueba_sin_solaparse(qtbot, emisora, make_service):
+    """En pausa el proxy ya cortó: el enlace se comprueba como siempre (sus
+    cabeceras dicen que es una radio) y sin coincidir con otra conexión."""
+    svc = make_service()
+    lid = _sonando(qtbot, svc, emisora)
+    svc.pause()
+    qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=2000)
+    with qtbot.waitSignal(svc.link_resolved, timeout=WAIT) as blocker:
+        svc.add_link(emisora.url('prem4'), lid)
+    assert blocker.args == [lid, 1, '']
+    assert svc.items(lid)[-1]['live'] is True               # comprobado: icy-*
+    recs = emisora.streams()
+    assert len(recs) == 2 and recs[-1]['ua'] == "PomoGrowth/9"
+    assert _sin_solapes(recs) and emisora.max_active_by_key[icecast.KEY] == 1
+
+
 @pytest.mark.parametrize("mode, text", [
     ('reject403', "La emisora rechazó la conexión (HTTP 403). Si es una radio de pago, "
                   "comprueba que no esté sonando en otro dispositivo y vuelve a darle a "
@@ -806,6 +874,82 @@ def test_un_rechazo_con_el_bufer_sonando_no_martillea(qtbot, emisora, make_servi
     after = emisora.streams(since)
     assert len(after) == 1 and after[0]['status'] == 403
     assert "HTTP 403" in svc.current()['error'] and emisora.max_active == 1
+
+
+@pytest.fixture
+def tres_emisoras():
+    """Tres emisoras gratuitas distintas (un Hub cada una), como las radios
+    de serie de «Radios lofi»."""
+    hubs = [icecast.start() for _ in range(3)]
+    yield hubs
+    for hub in hubs:
+        hub.close()
+
+
+def _sin_cuenta(hub):
+    """La URL de una emisora gratuita: sin la ?clave (las de serie no llevan)."""
+    return hub.url().split('?', 1)[0]
+
+
+@pytest.mark.parametrize("mode, text", [
+    ('reject403', "«Lofi 0» rechazó la conexión (HTTP 403): paso a la siguiente"),
+    ('reject429', "«Lofi 0» pide esperar antes de volver a conectar (HTTP 429): "
+                  "paso a la siguiente"),
+    ('reject451', "«Lofi 0» rechazó la conexión (HTTP 451): paso a la siguiente"),
+    ('html200', "«Lofi 0» envió una página web en vez del audio: paso a la siguiente")])
+def test_un_rechazo_de_una_emisora_sin_cuenta_pasa_a_la_siguiente(qtbot, tres_emisoras,
+                                                                 make_service, mode, text):
+    """I4 con emisoras distintas y sin cuenta en la URL (las radios de serie):
+    la 1.ª, llena (Icecast da 403 con el cupo de oyentes lleno), vetada en
+    este país (451), que pide esperar (429) o tras un portal (una página),
+    no apaga la música: una sola petición a ella y suena la 2.ª, sin tocar
+    la 3.ª. Sin el consejo de las radios de pago, que aquí no pinta nada."""
+    a, _b, _c = tres_emisoras
+    a.set_mode(mode)
+    svc = make_service()
+    lid, (first, second, _third) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    assert svc.current()['item_id'] == second and svc.is_playing
+    assert errors == [text]
+    assert [len(h.streams()) for h in tres_emisoras] == [1, 1, 0]
+
+
+def test_si_todas_las_emisoras_sin_cuenta_rechazan_una_peticion_a_cada_una(
+        qtbot, tres_emisoras, make_service):
+    """Saltar tiene el tope de siempre (tantos fallos como items): una
+    petición a cada una y se para, sin dar vueltas."""
+    for hub in tres_emisoras:
+        hub.set_mode('reject403')
+    svc = make_service()
+    lid, (first, _s, _t) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'error' and not svc.is_playing, timeout=WAIT)
+    qtbot.wait(1500)                             # más que ERROR_SKIP_MS y una reconexión
+    assert [len(h.streams()) for h in tres_emisoras] == [1, 1, 1]
+    assert errors[-1] == "No se pudo reproducir ninguna pista de la lista"
+
+
+def test_una_emisora_sin_cuenta_que_ya_sonaba_y_rechaza_para(qtbot, tres_emisoras,
+                                                             make_service):
+    """Si ya sonaba, un rechazo al reconectar tras un corte para, como con
+    cualquier radio: el salto es solo para la que nunca llegó a sonar."""
+    a, b, c = tres_emisoras
+    svc = make_service()
+    lid, (first, _s, _t) = _radio(svc, *(_sin_cuenta(h) for h in tres_emisoras))
+    svc.play(lid, first)
+    qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+    qtbot.wait(800)
+    a.set_mode('reject403', kill=True)           # corte y, al reconectar, 403
+    qtbot.waitUntil(lambda: svc.state == 'error' and not svc.is_playing, timeout=WAIT)
+    qtbot.wait(1500)
+    assert svc.current()['item_id'] == first and "HTTP 403" in svc.current()['error']
+    assert a.streams()[-1]['status'] == 403
+    assert b.streams() == [] and c.streams() == []
 
 
 def test_un_origen_que_cierra_al_aceptar_un_intento_por_reconexion(qtbot, emisora,

@@ -16,8 +16,13 @@ Contrato:
   la URL escrita algo distinta, o no cabía). Así no se duplican y una radio
   que el usuario borre no vuelve. Si borra la lista entera, solo una radio
   NUEVA de una versión futura la vuelve a crear. Tampoco vuelve al importar
-  un backup anterior a las radios de serie (sin 'seeds'): hereda la marca de
+  un backup anterior a las radios de serie (sin marca): hereda la marca de
   las que quitó (declined_radios) y recibe el resto.
+- La marca tiene una copia en data['settings']['radio_seeds'], y al cargar
+  vale la unión de las dos (DataHandler._sync_radio_seeds): la 1.0.1 y los
+  instaladores de antes de las radios reescriben data['music'] sin 'seeds'
+  en su primer guardado, pero conservan las claves de settings que no
+  conocen. Volver a una de ellas y luego a esta no resucita lo quitado.
 - Para un usuario nuevo la lista es la única; a quien ya tenía listas se le
   añade al final. Nunca sobre un archivo de datos que no se pudo leer
   (load_error), y DataHandler.SEED_DEFAULT_RADIOS = False la apaga (así va

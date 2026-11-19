@@ -163,11 +163,15 @@ def test_un_test_que_sale_a_internet_falla(tmp_path, red_bloqueada):
             fake_net.get("app.asana.com", "/api/1\\\\.0/users/me", {{'data': {{}}}})
             assert requests.get("https://app.asana.com/api/1.0/users/me").ok
     """), encoding="utf-8")
+    # La codificación, fija en los dos lados: el hijo hereda el entorno (una
+    # PYTHONIOENCODING=utf-8, como la de algunas terminales, le hacía
+    # escribir en UTF-8) y el padre leía con la del sistema (cp1252):
+    # «intentó» llegaba como «intentÃ³» y el test fallaba con la guarda bien
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:qt",
          str(tmp_path / "test_hijo.py")],
-        cwd=tmp_path, capture_output=True, text=True, timeout=180,
-        env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1'})
+        cwd=tmp_path, capture_output=True, encoding="utf-8", errors="replace", timeout=180,
+        env={**os.environ, 'PYTHONDONTWRITEBYTECODE': '1', 'PYTHONIOENCODING': 'utf-8'})
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
     assert "El test intentó salir a internet" in out and FUERA_IP in out, out

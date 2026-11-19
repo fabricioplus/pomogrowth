@@ -25,6 +25,8 @@ def _already_running(elevated: bool) -> Optional[int]:
       cierra sin más (0);
     - si contesta que se está cerrando (su despedida), esta espera a que
       suelte el singleton y arranca normal (None);
+    - si es de otra carpeta (la instalada y una portable, otro build: cada
+      una con sus datos), no se muestra y un aviso lo dice (1);
     - si no contesta a tiempo, o esta es administradora (la relanzada o
       «Ejecutar como administrador» a mano: la otra tendría que cerrarse, no
       mostrarse), el aviso de siempre (1), que explica qué hacer."""
@@ -38,6 +40,14 @@ def _already_running(elevated: bool) -> Optional[int]:
             return 0
         if reply == singleton.CLOSING and singleton.acquire_waiting(singleton.CLOSING_WAIT_S):
             return None
+        if reply == singleton.OTHER:
+            QMessageBox.warning(
+                None, "PomoGrowth",
+                "Ya hay otra PomoGrowth abierta desde otra carpeta (la instalada, "
+                "una portable u otra copia), con sus propios datos.\n\nPara usar la "
+                "de esta carpeta, cierra la otra (clic derecho en su icono de la "
+                "bandeja → Cerrar) y vuelve a abrirla.")
+            return 1
     QMessageBox.warning(
         None, "PomoGrowth",
         "PomoGrowth ya está abierto; quizá esté en la bandeja del sistema, "
@@ -72,7 +82,8 @@ def _serve_session(app, controller):
     nada mientras todo va bien), que se para al salir. Devuelve (canal,
     vigía); cualquiera puede ser None si no se pudo."""
     from services import singleton
-    server = singleton.listen_for_show(controller.show_from_other_instance, parent=controller)
+    server = singleton.listen_for_show(controller.show_from_other_instance, parent=controller,
+                                       is_closing=controller.is_closing)
     watchdog = start_ui_watchdog(fault_log_file(), parent=app)
     if watchdog is not None:
         app.aboutToQuit.connect(watchdog.stop)

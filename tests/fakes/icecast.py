@@ -42,7 +42,9 @@ nuevas y kill=True corta además las abiertas):
   (206 con Range), sin icy-*.
 - 'chunked': la misma pista por partes (HTTP/1.1 chunked), sin tamaño ni
   icy-*, con su parte final: como la sirven un PHP o un Node.
-- 'icy_v1': la línea de estado «ICY 200 OK» de SHOUTcast v1 y unas tramas.
+- 'icy_v1': la línea de estado «ICY 200 OK» de SHOUTcast v1 y unas tramas;
+  espera 2 s a que el cliente cierre y, si no, cierra él con
+  end='server_timeout'.
 Formatos (Hub.formats): el de cada conexión de audio sale de esa lista en
 orden y el último se repite: 'mp3' (MPEG-1 capa III, 320 kbps, 44,1 kHz),
 'aac' (ADTS AAC-LC 44,1 kHz estéreo) y 'aac22' (ADTS AAC-LC 22,05 kHz). Las
@@ -313,11 +315,17 @@ class Handler(BaseHTTPRequestHandler):
     def _gone(self) -> bool:
         return peer_gone(self.connection)
 
-    def _wait_gone(self, hub: Hub, rec: Dict[str, Any], seconds: float) -> None:
+    def _wait_gone(self, hub: Hub, rec: Dict[str, Any], seconds: float) -> bool:
+        """Espera a que el cliente cierre, como mucho `seconds`. True si cerró
+        (o lo cortó kill/close); si vence el plazo, el falso cierra él y el
+        registro lo dice (end='server_timeout'), no «client_closed»."""
         end = time.monotonic() + seconds
-        while time.monotonic() < end and not (rec['kill'].is_set() or hub.stopping.is_set()
-                                              or self._gone()):
+        while time.monotonic() < end:
+            if rec['kill'].is_set() or hub.stopping.is_set() or self._gone():
+                return True
             time.sleep(0.01)
+        rec['end'] = rec['end'] or 'server_timeout'
+        return False
 
     def _stream(self, hub: Hub, rec: Dict[str, Any], cut_after=None) -> None:
         fmt = rec['format'] = hub._next_format()

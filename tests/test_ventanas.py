@@ -230,6 +230,29 @@ def test_compacta_durante_el_desvanecido_de_minimizar(ctrl, qtbot):
     assert not win.isMinimized() and not ctrl.compact_window.isVisible()
 
 
+def test_la_compacta_suelta_la_tarea_que_suelta_un_sync(ctrl, monkeypatch):
+    """Timer parado y la compacta a la vista: un sync en segundo plano (el
+    reintento, el diferido tras un envío, el del arranque) trae la tarea
+    activa completada en Asana y se suelta. La compacta lo dice al momento:
+    seguía con su nombre (parado, el tick no la refresca) y su ▶ contestaba
+    «Sin tarea activa»."""
+    from ui.dialogs import branded_dialogs as dialogs
+    asked = []
+    monkeypatch.setattr(dialogs, "info", lambda _parent, title, *a, **k: asked.append(title))
+    ctrl.select_task(ID1)
+    ctrl.show_compact()
+    cw = ctrl.compact_window
+    assert cw._task_name == 'Informe'
+    for task in ctrl.data_handler.data['tasks']:
+        task['completed'] = True                   # cerrada en Asana
+    ctrl.asana.finished.emit(1)
+    assert ctrl.model.active_task_id is None
+    assert cw._task_name is None
+    assert cw.task_label._full == "Ninguna tarea seleccionada"
+    assert asked == []
+    ctrl.show_normal()
+
+
 def test_minimizar_sigue_minimizando(ctrl, qtbot):
     """El guardia del final del desvanecido no estorba al caso normal."""
     win = ctrl.window
@@ -253,6 +276,41 @@ def test_el_tick_repone_el_encima_de_todo_y_lo_apunta(ctrl, native, caplog):
     with caplog.at_level(logging.INFO):
         ctrl._keep_on_top()                        # ya lo tiene: ni se toca
     assert native.calls == [(_hwnd(win), True)] and not caplog.records
+
+
+def test_si_windows_no_deja_reponerlo_no_dice_repuesto(ctrl, native, caplog, monkeypatch):
+    """SetWindowPos puede contestar TRUE sin aplicar el «encima de todo»
+    (según la ventana en primer plano). El log no puede decir «repuesto»
+    justo cuando no lo está: lo dice una vez, sin repetirlo en cada tick (el
+    log no rota), y «repuesto» cuando por fin lo esté."""
+    from utils import win_native
+    monkeypatch.setattr(win_native, "_refused", set())
+    win = ctrl.window
+    native.top[_hwnd(win)] = False
+    refusing = [True]
+
+    def set_topmost(hwnd, on):                     # acepta, y aplica o no
+        native.calls.append((int(hwnd), bool(on)))
+        if not refusing[0]:
+            native.top[int(hwnd)] = bool(on)
+        return True
+    monkeypatch.setattr(win_native, "set_topmost", set_topmost)
+
+    def lines():
+        return [r.getMessage() for r in caplog.records if "principal" in r.getMessage()]
+    with caplog.at_level(logging.INFO):
+        for _ in range(3):
+            ctrl._keep_on_top()
+        assert win_native.keep_topmost(_hwnd(win), "principal") is False
+    assert len(native.calls) == 4                  # se sigue intentando
+    assert len(lines()) == 1 and "no dejó reponerlo" in lines()[0]
+    caplog.clear()
+    refusing[0] = False
+    with caplog.at_level(logging.INFO):
+        ctrl._keep_on_top()
+        ctrl._keep_on_top()                        # ya lo tiene: ni se toca
+    assert len(lines()) == 1 and lines()[0].endswith("repuesto")
+    assert len(native.calls) == 5
 
 
 def test_el_tick_lo_mira_cada_dos_segundos(ctrl, monkeypatch):
@@ -373,7 +431,36 @@ def _user32():
     user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.RECT))
     user32.GetWindow.restype = wintypes.HWND
     user32.GetWindow.argtypes = (wintypes.HWND, wintypes.UINT)
+    user32.SetWindowPos.restype = wintypes.BOOL
+    user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                    ctypes.c_int, ctypes.c_int, wintypes.UINT)
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
     return user32
+
+
+def _windows_lets_topmost(user32) -> bool:
+    """¿Deja Windows ahora mismo poner WS_EX_TOPMOST a una ventana de este
+    proceso? Con ciertas ventanas en primer plano (un navegador…),
+    SetWindowPos contesta TRUE sin aplicarlo: depende del escritorio, no del
+    código. Se mira con una ventana de control, sin pasar por win_native."""
+    gwl_exstyle, ws_ex_topmost, hwnd_topmost = -20, 0x8, -1
+    flags = 0x0001 | 0x0002 | 0x0010               # NOSIZE | NOMOVE | NOACTIVATE
+    hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth control", 0, 70, 80, 10, 10,
+                                  None, None, None, None)
+    if not hwnd:
+        return False
+    try:
+        user32.SetWindowPos(hwnd, hwnd_topmost, 0, 0, 0, 0, flags)
+        return bool(user32.GetWindowLongW(hwnd, gwl_exstyle) & ws_ex_topmost)
+    finally:
+        user32.DestroyWindow(hwnd)
+
+
+def _skip_if_windows_refuses(user32) -> None:
+    if not _windows_lets_topmost(user32):
+        pytest.skip("Windows no deja poner el «encima de todo» ahora mismo (depende "
+                    "de la ventana en primer plano, no del código)")
 
 
 def _window_rect(user32, hwnd):
@@ -389,28 +476,37 @@ def test_win_native_con_una_ventana_win32_de_verdad(monkeypatch, caplog):
     """Una ventana Win32 real, oculta y sin activar (nada se ve), fuera del
     (0, 0): poner y quitar el «encima de todo» sin moverla ni
     redimensionarla, y reponerlo con su línea en el log (y sin ella si no lo
-    había perdido, aunque se fuerce)."""
+    había perdido, aunque se fuerce). Si Windows no deja subir de banda en
+    ese momento (lo mira una ventana de control antes y, si algo falla,
+    otra vez), se salta: es el escritorio, no el código."""
     from utils import win_native
     monkeypatch.setattr(win_native, "_native_windows", lambda: True)
+    monkeypatch.setattr(win_native, "_refused", set())
     user32 = _user32()
+    _skip_if_windows_refuses(user32)
     hwnd = user32.CreateWindowExW(0, "STATIC", "PomoGrowth prueba", 0, 50, 60, 10, 10,
                                   None, None, None, None)
     assert hwnd
     try:
-        rect = _window_rect(user32, hwnd)
-        assert rect[:2] == (50, 60)
-        assert win_native.is_topmost(hwnd) is False
-        assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
-        assert _window_rect(user32, hwnd) == rect    # ni movida ni redimensionada
-        assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
-        with caplog.at_level(logging.INFO):
-            assert win_native.keep_topmost(hwnd, "prueba") is True
-            assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
-            # Forzado (fade_show, la compacta al mostrarse, «Guardar») sobre una
-            # que no lo perdió: ni una línea, o el log no distinguiría una pérdida
-            assert win_native.keep_topmost(hwnd, "prueba", force=True) is False
-        assert win_native.is_topmost(hwnd) is True
-        assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        try:
+            rect = _window_rect(user32, hwnd)
+            assert rect[:2] == (50, 60)
+            assert win_native.is_topmost(hwnd) is False
+            assert win_native.set_topmost(hwnd, True) and win_native.is_topmost(hwnd) is True
+            assert _window_rect(user32, hwnd) == rect    # ni movida ni redimensionada
+            assert win_native.set_topmost(hwnd, False) and win_native.is_topmost(hwnd) is False
+            with caplog.at_level(logging.INFO):
+                assert win_native.keep_topmost(hwnd, "prueba") is True
+                assert win_native.keep_topmost(hwnd, "prueba") is False   # ya lo tiene
+                # Forzado (fade_show, la compacta al mostrarse, «Guardar») sobre
+                # una que no lo perdió: ni una línea, o el log no distinguiría
+                # una pérdida
+                assert win_native.keep_topmost(hwnd, "prueba", force=True) is False
+            assert win_native.is_topmost(hwnd) is True
+            assert len([r for r in caplog.records if "prueba" in r.getMessage()]) == 1
+        except AssertionError:
+            _skip_if_windows_refuses(user32)       # cambió el primer plano a mitad
+            raise
         assert _window_rect(user32, hwnd) == rect
         assert not user32.IsWindowVisible(hwnd)    # nunca se mostró
     finally:
@@ -437,6 +533,8 @@ def test_reponer_el_encima_de_todo_deja_sus_modales_encima(monkeypatch):
     from utils import win_native
     monkeypatch.setattr(win_native, "_native_windows", lambda: True)
     user32 = _user32()
+    # Si Windows no deja subir de banda ahora, pasaría sin comprobar nada
+    _skip_if_windows_refuses(user32)
     GW_HWNDPREV = 3
     WS_POPUP, WS_EX_TOPMOST, WS_EX_NOACTIVATE = 0x80000000, 0x8, 0x08000000
 
@@ -637,11 +735,115 @@ def test_el_nombre_del_canal_es_por_usuario_sin_el_nombre(monkeypatch):
     assert a != b and a.startswith("PomoGrowth-") and "Ana" not in a
 
 
+def test_la_carpeta_de_la_instalacion_distingue_y_normaliza(monkeypatch, tmp_path):
+    """install_id: la instalada y una portable (otra carpeta, con sus datos)
+    no son la misma; la misma carpeta escrita con otras mayúsculas, sí. Y
+    no deja la ruta a la vista (lleva el nombre de usuario)."""
+    from services import singleton
+    installed, portable = tmp_path / "Instalada", tmp_path / "Portable"
+    installed.mkdir()
+    portable.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    ids = {}
+    for name, folder in (("instalada", installed), ("portable", portable),
+                         ("otra_grafia", Path(str(installed).upper()))):
+        monkeypatch.setattr(sys, "executable", str(folder / "PomoGrowth.exe"))
+        ids[name] = singleton.install_id()
+    assert ids["instalada"] != ids["portable"]
+    if sys.platform == "win32":
+        assert ids["otra_grafia"] == ids["instalada"]
+    assert all(len(v) == 12 and "Instalada" not in v for v in ids.values())
+
+
+@pytest.mark.parametrize("closing, expect", [(False, "other"), (True, "closing")])
+def test_el_canal_no_se_muestra_a_otra_carpeta(qtbot, closing, expect):
+    """De otra carpeta, no se muestra: «other» (la otra da su aviso) o, si
+    esta se está despidiendo, «closing» (el puerto es de todo el equipo: la
+    otra espera a que se cierre y arranca)."""
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name,
+                                       is_closing=lambda: closing, install="otra-carpeta")
+    try:
+        reply, _seconds = _second_instance(qtbot, name)    # la del repo: otra
+        assert reply == expect and shown == []
+    finally:
+        server.close()
+        server.deleteLater()
+
+
+def test_un_show_sin_carpeta_es_de_otra(qtbot):
+    """Un «show» a secas viene de una versión sin la carpeta (otra
+    instalación): tampoco se muestra."""
+    from PySide6.QtNetwork import QLocalSocket
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name)
+    sock = QLocalSocket()
+    try:
+        sock.connectToServer(name)
+        assert sock.waitForConnected(1000)
+        sock.write(b"show\n")
+        sock.flush()
+        got = bytearray()
+        qtbot.waitUntil(lambda: got.extend(bytes(sock.readAll())) or b"\n" in got,
+                        timeout=3000)
+        assert bytes(got).strip() == singleton.OTHER_REPLY and shown == []
+    finally:
+        sock.abort()
+        server.close()
+        server.deleteLater()
+
+
+_OTHER_FOLDER = ("import sys; sys.path.insert(0, sys.argv[1])\n"
+                 "sys.frozen = True; sys.executable = sys.argv[3]\n"
+                 "from PySide6.QtWidgets import QApplication, QMessageBox\n"
+                 "app = QApplication([])\n"
+                 "from services import singleton\n"
+                 "singleton.channel_name = lambda: sys.argv[2]\n"
+                 "seen = []\n"
+                 "QMessageBox.warning = staticmethod(lambda *a, **k: seen.append(a[2]))\n"
+                 "import main\n"
+                 "code = main._already_running(False)\n"
+                 "print(code, int(len(seen) == 1 and 'otra carpeta' in seen[0]))\n")
+
+
+def test_abrir_otra_carpeta_no_trae_al_frente_la_abierta(qtbot, tmp_path):
+    """La instalada abierta y se abre la portable (u otro build, o el repo):
+    no consigue el puerto, que es de todo el equipo, pero tampoco puede
+    traer al frente la otra, con sus datos y su código: el usuario creería
+    tener delante la que abrió. La abierta se queda como está y la nueva
+    dice por qué no arranca. Con un proceso de verdad, «congelado» en otra
+    carpeta, y main._already_running."""
+    from services import singleton
+    name = _channel()
+    shown = []
+    server = singleton.listen_for_show(lambda: shown.append(1), name=name)
+    exe = tmp_path / "portable" / "PomoGrowth.exe"
+    env = dict(os.environ, QT_QPA_PLATFORM="offscreen", PYTHONDONTWRITEBYTECODE="1")
+    proc = subprocess.Popen([sys.executable, "-c", _OTHER_FOLDER, str(V9), name, str(exe)],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True)
+    try:
+        qtbot.waitUntil(lambda: proc.poll() is not None, timeout=60000)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        server.close()
+        server.deleteLater()
+    out = proc.stdout.read().split()
+    assert proc.returncode == 0 and out[-2:] == ["1", "1"], out
+    assert shown == []
+
+
 @pytest.mark.parametrize("elevated, reply, freed, code, warned, asked", [
     (False, "shown", None, 0, False, True),       # la primera se muestra: sin aviso
     (False, "", None, 1, True, True),             # no contesta: el aviso de siempre
     (False, "closing", True, None, False, True),  # se despedía: arranca esta
     (False, "closing", False, 1, True, True),     # se despide y no acaba: el aviso
+    (False, "other", None, 1, True, True),        # de otra carpeta: su aviso
     (True, "shown", None, 1, True, False),        # administradora: el aviso
 ])
 def test_main_con_otra_instancia_abierta(monkeypatch, qtbot, elevated, reply, freed, code,
@@ -784,6 +986,8 @@ def test_el_aviso_no_tapa_los_controles_de_la_compacta(qtbot, where):
             assert card.bottom() < compact_card.top()      # no cabe debajo: encima
         else:
             assert card.top() > compact_card.bottom()      # debajo
+        # Y aunque tapara algo, los clics lo atraviesan (no tiene nada que pulsar)
+        assert t.windowFlags() & Qt.WindowTransparentForInput
     finally:
         toast.dismiss(t)
 
@@ -1317,6 +1521,56 @@ def test_el_vigia_no_avisa_de_un_bloqueo_que_no_hubo(tmp_path, qtbot, caplog):
         dog.stop()
         faulthandler.cancel_dump_traceback_later()
         handle.close()
+
+
+def test_una_suspension_no_es_un_bloqueo(tmp_path, qtbot, caplog):
+    """El equipo se suspende una hora con la app abierta y, al despertar, una
+    DLL maneja una excepción que faulthandler apunta igual (la app sigue).
+    time.monotonic (QueryPerformanceCounter) cuenta la suspensión: el primer
+    latido veía una hora de hueco y el archivo más grande, y avisaba de un
+    bloqueo de ~3600 s sin pilas del vigía. Solo cuenta un volcado suyo
+    («Timeout (…)!»). La suspensión se simula con el reloj del vigía y su
+    temporizador parado."""
+    import faulthandler
+    from utils import logging_setup
+    path = tmp_path / "fallos.log"
+    handle = open(path, "a", encoding="utf-8")
+    now = [1000.0]
+    dog = logging_setup._UiWatchdog(handle, 5.0, 1000)
+    dog.clock = lambda: now[0]
+    dog.start()
+    try:
+        with caplog.at_level(logging.WARNING):
+            now[0] += 1.0
+            dog._beat()                            # todo bien antes de suspender
+            dog._timer.stop()                      # suspendido: nada late
+            now[0] += 3600.0
+            with open(path, "a", encoding="utf-8") as other:   # al despertar
+                other.write("Windows fatal exception: code 0x80010108\n\n"
+                            "Current thread 0x0001 (most recent call first):\n"
+                            '  File "x.py", line 1 in <module>\n')
+            now[0] += 0.2
+            dog._beat()                            # el primer latido al despertar
+        assert not [r for r in caplog.records if "bloqueado" in r.getMessage()]
+    finally:
+        dog.stop()
+        faulthandler.cancel_dump_traceback_later()
+        handle.close()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="QueryUnbiasedInterruptTime es de Windows")
+def test_el_reloj_del_vigia_no_cuenta_la_suspension():
+    """El hueco se mide con QueryUnbiasedInterruptTime, que no cuenta la
+    suspensión (time.monotonic sí): un bloqueo de verdad al despertar dice
+    lo que duró él, no la siesta. Despierto, avanza como time.monotonic."""
+    from utils import logging_setup
+    clock = logging_setup._awake_clock()
+    assert clock is not time.monotonic
+    start, mono = clock(), time.monotonic()
+    time.sleep(0.3)
+    elapsed = clock() - start
+    assert 0.2 < elapsed < 1.5
+    assert abs(elapsed - (time.monotonic() - mono)) < 0.1
 
 
 def test_el_vigia_vuelca_las_pilas_si_el_hilo_se_bloquea(tmp_path, qtbot, caplog):

@@ -633,6 +633,49 @@ def test_shuffle_y_repeat_en_siguiente(make_service):
     assert seen == set(ids)                                  # una vuelta sin repetir
 
 
+@pytest.mark.parametrize("size", [3, 10])
+def test_con_aleatorio_una_racha_de_fallos_no_repite_ninguno(make_service, monkeypatch,
+                                                            size):
+    """Aleatorio y repetir «todo» (lo de serie), todos caídos menos uno: una
+    racha de fallos que llega al final de la vuelta rebaraja, y lo que ya
+    falló va al final de la nueva. Si no, podía volver uno caído antes de
+    probar los demás y rendirse («ninguna pista») sin pedir nunca el que
+    funciona: con 3 radios y 2 caídas, ~1 de cada 6 veces. Sin red ni
+    reproductor: _play_item solo elige y se falla a mano."""
+    import random
+    svc = make_service()
+    lid, ids = _list_with(svc, *[Entry(f"http://127.0.0.1:9/r{n}", title=f"R{n}", live=True)
+                                 for n in range(size)])
+    svc.set_shuffle(True)
+    assert svc.repeat() == 'all'
+    monkeypatch.setattr(svc, "_play_item", lambda list_id, item_id: svc._select(list_id,
+                                                                                 item_id))
+    gave_up = []
+    monkeypatch.setattr(svc, "_give_up", lambda message, short='': gave_up.append(message))
+    saved = random.getstate()
+    try:
+        for seed in range(150):
+            random.seed(seed)
+            alive = ids[seed % size]
+            svc._shuffle_list, svc._shuffle_order = None, []
+            svc._select(lid, svc._first_item_id(lid))           # la vuelta de esta escucha
+            start = random.choice([i for i in ids if i != alive])   # elige uno caído
+            svc.play(lid, start)
+            svc._set_want(True)
+            tried, gave_up[:] = [], []
+            while svc._cur_item != alive and not gave_up:
+                tried.append(svc._cur_item)
+                svc._on_failure()
+                svc._skip_timer.stop()
+                if not gave_up:
+                    svc._skip_after_error()
+            assert not gave_up, (seed, tried)
+            assert len(tried) == len(set(tried)) < size, (seed, tried)
+    finally:
+        random.setstate(saved)
+        svc._stop_timers()
+
+
 # ------------------------------------------------------------------ revisión: red y plazos
 class _Drip:
     """Servidor TCP crudo en 127.0.0.1 que gotea un byte cada `every` s (menos

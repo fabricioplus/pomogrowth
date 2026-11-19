@@ -39,6 +39,10 @@ class _Registro(_Handler):
         with self.server.lock:
             self.server.requests.append(
                 (self.path, (self.headers.get("User-Agent") or '').split('/')[0]))
+        if self.path.split('?', 1)[0] == '/llena':
+            # Un Icecast con el cupo de oyentes lleno: 403 con una página
+            self._send(b"<html><body>Too many listeners</body></html>", "text/html", 403)
+            return
         super().do_GET()
 
 
@@ -160,6 +164,75 @@ def test_una_radio_de_serie_caida_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
         assert [p for p, _ua in _requests(emisora)].count("/caducada") == 1
         # La caída sigue guardada como directo: no se rebaja a pista
         assert svc.items(rc.SEED_LIST_ID)[0]['live'] is True
+    finally:
+        _cerrar(svc, qtbot)
+
+
+def test_una_radio_de_serie_llena_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
+                                                     monkeypatch):
+    """Un 403 de la primera (un Icecast con el cupo de oyentes lleno) es un
+    rechazo, pero su URL no lleva cuenta: como una caída, una sola petición
+    a ella y suena la siguiente. Antes se apagaba toda la música con el
+    consejo de las radios de pago."""
+    catalog = (rc.DefaultRadio('llena', "Llena", f"{emisora.base}/llena",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('viva', "Viva", f"{emisora.base}/live?r=viva",
+                               'audio/mpeg', 128))
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    errors, states = [], []
+    svc.error_occurred.connect(errors.append)
+    svc.state_changed.connect(states.append)
+    try:
+        svc.play()
+        assert svc.current()['title'] == "Llena"
+        qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+        assert svc.current()['title'] == "Viva" and svc.is_playing
+        assert errors == ["«Llena» rechazó la conexión (HTTP 403): paso a la siguiente"]
+        assert 'reconnecting' not in states
+        assert [p for p, _ua in _requests(emisora)].count("/llena") == 1
+    finally:
+        _cerrar(svc, qtbot)
+
+
+def test_con_aleatorio_dos_caidas_no_tapan_a_la_que_funciona(qtbot, tmp_path, emisora,
+                                                           monkeypatch):
+    """Aleatorio y repetir «todo» (lo de serie) con 2 de las 3 radios caídas.
+    El usuario elige a mano la última del orden barajado; falla y, al
+    rebarajar, sale [b, a, c] (una de las salidas posibles): antes volvía a
+    pedir «a», ya caída, y se rendía con «ninguna pista» sin probar «c»."""
+    from services import music_service as ms
+    catalog = (rc.DefaultRadio('r0', "Radio 0", f"{emisora.base}/caducada?r=0",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('r1', "Radio 1", f"{emisora.base}/caducada?r=1",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('r2', "Radio 2", f"{emisora.base}/live?r=2",
+                               'audio/mpeg', 128))
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    svc.ERROR_SKIP_MS = 200
+    ids = {it['title']: it['id'] for it in svc.items(rc.SEED_LIST_ID)}
+    a, b, c = ids["Radio 0"], ids["Radio 1"], ids["Radio 2"]
+    orders = [[c, b, a], [b, a, c]]       # al empezar; al rebarajar tras fallar «a»
+
+    def fake_shuffle(seq):
+        seq[:] = orders.pop(0)
+    monkeypatch.setattr(ms.random, "shuffle", fake_shuffle)
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    try:
+        assert svc.repeat() == 'all'
+        svc.set_shuffle(True)
+        svc.play(rc.SEED_LIST_ID)
+        qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+        assert svc.current()['title'] == "Radio 2"
+        svc.play(rc.SEED_LIST_ID, a)                 # elige a mano «Radio 0»
+        qtbot.waitUntil(lambda: svc.state == 'playing' or not svc.is_playing,
+                        timeout=WAIT)
+        assert svc.state == 'playing' and svc.current()['title'] == "Radio 2"
+        assert errors == ["No se pudo reproducir «Radio 0»: paso a la siguiente",
+                          "No se pudo reproducir «Radio 1»: paso a la siguiente"]
+        paths = [p for p, _ua in _requests(emisora)]
+        assert paths.count("/caducada?r=0") == 1 and paths.count("/caducada?r=1") == 1
+        assert orders == []
     finally:
         _cerrar(svc, qtbot)
 

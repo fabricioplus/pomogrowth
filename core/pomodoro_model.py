@@ -89,7 +89,12 @@ class PomodoroModel:
         if not keep_cycle: self.pomodoro_cycle_count = 0
     def is_session_in_progress(self) -> bool:
         """True si el pomodoro actual ya inició su conteo (corriendo o pausado
-        a mitad). En descanso devuelve False: ahí la tarea puede cambiarse."""
+        a mitad). En descanso devuelve False: ahí la tarea puede cambiarse.
+        Ojo: mide contra pomodoro_duration, y si a mitad se acorta la duración
+        en Ajustes da False con el pomodoro aún empezado. La app decide con
+        AppController._work_in_progress (contra el total de la sesión): el
+        candado de la tarea, «Parar», el selector y set_kind (set_timer_kind
+        mira antes)."""
         if self.is_break_time:
             return False
         if self.is_free:

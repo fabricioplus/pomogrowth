@@ -33,6 +33,7 @@ Contrato con la interfaz (resumen; detalle en cada método):
   desde la primera conexión, con precarga 0 (la latencia de ir directo), y
   el proxy es lo único que habla con la emisora: los títulos ICY, el nombre,
   los kbps y el tipo llegan por su señal metadata, de esa misma conexión.
+  Mientras suena, añadir un enlace tampoco conecta a comprobarlo (add_link).
   Con un item de vida desconocida (live None, como las entradas de un .pls)
   deciden sus cabeceras: una pista (Content-Length o Accept-Ranges sin
   icy-*) va directa por 302 y se guarda live False. Si el proxy no puede
@@ -44,8 +45,12 @@ Contrato con la interfaz (resumen; detalle en cada método):
   no como fin: una radio sin icy-* no se confunde con una pista que acabó.
 - Rechazo: con 401/402/403/407/429/451, o una página web donde iba el
   audio, el proxy hace una sola petición y avisa (rejected): se para a la
-  primera, sin reintentar ni saltar al siguiente espejo, con un mensaje que
-  lleva el código (con el 429, que la emisora pide esperar).
+  primera, sin reintentar ni saltar al siguiente espejo (los de un .pls de
+  DI.FM llevan la misma clave), con un mensaje que lleva el código (con el
+  429, que la emisora pide esperar). Salvo una emisora cuya URL no lleva
+  cuenta (ni consulta ni usuario, como las radios de serie) que aún no sonó
+  desde que se eligió, en una lista con más: llena, vetada en este país o
+  tras un portal, pasa a la siguiente como una radio caída.
 - Tope global: más de RATE_MAX_CONNECTIONS conexiones con el origen en
   RATE_WINDOW_S (las del proxy y las directas, desde que se le dio a
   reproducir ese item) → se para con un mensaje claro, sin bucles.
@@ -83,14 +88,15 @@ import random
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtMultimedia import QAudioOutput, QMediaMetaData, QMediaPlayer
 
 from core.music_library import (EXT_MIME, HLS_EXTS, LOFI_LIST_ID, MAX_ITEMS_PER_LIST,
-                                REPEAT_MODES, Entry, MusicLibrary, classify_link, codec_name,
-                                scan_audio_folder, source_ext, title_from_source,
-                                update_item_fields)
+                                PLAYLIST_EXTS, REPEAT_MODES, Entry, MusicLibrary,
+                                classify_link, codec_name, scan_audio_folder, source_ext,
+                                title_from_source, update_item_fields)
 from services.music_resolver import (MSG_HLS_UNSAFE, Deadline, ResolveResult,
                                      local_hls_file_ok, resolve_link)
 from services.stream_buffer import PREFILL_GRACE_S, ConnectionBudget, StreamBuffer
@@ -183,6 +189,7 @@ class MusicService(QObject):
         self._focus_running = False
         self._attempts = 0            # reconexiones seguidas
         self._errors_in_row = 0       # pistas finitas fallidas seguidas
+        self._failed_ids: set = set()   # los items de esa racha (_neighbor)
         self._played = False          # avanzó alguna vez desde que se eligió
         self._progressed = False      # avanzó desde el último setSource
         self._live_runtime: Optional[bool] = None
@@ -411,7 +418,7 @@ class MusicService(QObject):
             return
         if item_id is None or self._lookup(list_id, item_id) is None:
             item_id = self._first_item_id(list_id)
-        self._errors_in_row = 0
+        self._reset_errors()
         same = (list_id == self._cur_list and item_id == self._cur_item
                 and self._loaded_key is not None)
         if same and self._want and self._state not in ('error', 'idle'):
@@ -427,7 +434,7 @@ class MusicService(QObject):
             return
         if self._want and self._state in ('loading', 'buffering', 'playing', 'reconnecting'):
             return
-        self._errors_in_row = 0
+        self._reset_errors()
         self._set_want(True)
         if self._gated():
             self._halt()
@@ -492,7 +499,7 @@ class MusicService(QObject):
             if self._loaded_key is not None and not self._is_live():
                 self._player.setPosition(0)
                 return
-        self._errors_in_row = 0
+        self._reset_errors()
         self._play_item(self._cur_list, item_id)
 
     def seek(self, ms: int) -> None:
@@ -654,7 +661,20 @@ class MusicService(QObject):
         añadidos, error). Sin list_id: una playlist crea su propia lista; un
         audio suelto va a la lista actual o a «Mis enlaces». Va en un hilo
         propio con plazo total (2×LINK_TIMEOUT_S): un servidor lento no
-        ocupa los hilos de Asana ni retiene el cierre de la app."""
+        ocupa los hilos de Asana ni retiene el cierre de la app.
+
+        Con una emisora sonando o a punto (_station_busy), un enlace http(s)
+        que no es una lista por su extensión se añade sin comprobarlo:
+        comprobarlo es conectar a la emisora, y una radio de pago (DI.FM…)
+        que vea otra conexión con la misma cuenta (otro canal, un espejo, el
+        mismo enlace) pausa la cuenta. Entra de vida desconocida y el proxy
+        decide al sonar (directo o pista, o el error). Una lista sí se baja:
+        es un texto, no audio."""
+        unprobed = self._unprobed(text) if self._station_busy() else None
+        if unprobed is not None:
+            # Después de volver, como cuando se resuelve en el hilo
+            QTimer.singleShot(0, self, lambda: self._on_link_done(unprobed, list_id))
+            return
         from services.workers import run_in_thread
         timeout = self.LINK_TIMEOUT_S
         deadline = Deadline(max(timeout, 1) * 2)
@@ -664,6 +684,26 @@ class MusicService(QObject):
                       on_error=lambda _e: self._on_link_done(
                           ResolveResult(error="No se pudo abrir ese enlace"), list_id,
                           deadline))
+
+    def _station_busy(self) -> bool:
+        """¿Hay, o está a punto de haber, una conexión con una emisora por
+        enlace? La música encendida (sonando, cargando, reconectando,
+        saltando tras un fallo o esperando al enfoque) con un enlace que
+        puede ser un directo, el que pasaría por el proxy. En pausa o parada
+        el proxy ya cortó la conexión."""
+        return self._want and self._proxy_eligible(self._current_item())
+
+    @staticmethod
+    def _unprobed(text: str) -> Optional[ResolveResult]:
+        """Un enlace http(s) que no es una lista (.pls, .m3u, .m3u8, .xspf,
+        .hls), como entrada sin comprobar (live None, el título de la URL);
+        None si hay que resolverlo: una lista, un archivo o algo que no vale
+        (resolve_link da el error sin red)."""
+        info = classify_link(text)
+        if info.kind != 'url' or source_ext(info.normalized) in PLAYLIST_EXTS | HLS_EXTS:
+            return None
+        url = info.normalized
+        return ResolveResult(entries=[Entry(url, title_from_source(url))])
 
     def _on_link_done(self, res: ResolveResult, list_id: Optional[str],
                       deadline: Optional[Deadline] = None) -> None:
@@ -840,8 +880,15 @@ class MusicService(QObject):
         if auto and self.repeat() == 'off':
             return None
         if self.shuffle() and pos >= len(order):
-            self._shuffle_order = self._new_shuffle(ids, avoid=self._cur_item)
-            return self._shuffle_order[0]
+            order = self._new_shuffle(ids, avoid=self._cur_item)
+            if from_error:
+                # Una racha de fallos: lo que ya falló, al final de la vuelta
+                # nueva. Así cada intento es otro item y rendirse tras tantos
+                # fallos como items (_on_failure) es haberlos probado todos
+                order = ([i for i in order if i not in self._failed_ids]
+                         + [i for i in order if i in self._failed_ids])
+            self._shuffle_order = order
+            return order[0]
         return order[pos % len(order)]
 
     def _select(self, list_id: str, item_id: str) -> None:
@@ -1044,8 +1091,13 @@ class MusicService(QObject):
         self._watchdog.start(self.WATCHDOG_MS)
         self.now_playing_changed.emit()
 
-    def _mark_playing(self) -> None:
+    def _reset_errors(self) -> None:
+        """Se acaba la racha de fallos: algo sonó o el usuario eligió."""
         self._errors_in_row = 0
+        self._failed_ids.clear()
+
+    def _mark_playing(self) -> None:
+        self._reset_errors()
         if self._state != 'playing':
             self._set_state('playing')
             if self._attempts and not self._stable_timer.isActive():
@@ -1164,11 +1216,17 @@ class MusicService(QObject):
             return
         if self._stop_if_rejected():
             return   # ni reintentar ni saltar al siguiente espejo
-        if self._treat_as_live():
+        rejected = self._rejected_status()
+        if rejected is not None:
+            # Una emisora sin cuenta que rechaza antes de sonar: a la siguiente,
+            # con el motivo (nunca se reintenta: _rejection_skips)
+            message, short = self._rejected_skip_texts(rejected, item['title'])
+        elif self._treat_as_live():
             self._schedule_reconnect()
             return
         self._unload()
         self._errors_in_row += 1
+        self._failed_ids.add(item['id'])
         count = len(self._items_of(self._cur_list))
         reason = message or f"No se pudo reproducir «{item['title']}»"
         short = short or message or "No se pudo reproducir"
@@ -1359,13 +1417,59 @@ class MusicService(QObject):
         return (f"La emisora rechazó la conexión: envió una página web en vez del "
                 f"audio. {advice}", "Rechazada por la emisora (página web)")
 
-    def _stop_if_rejected(self) -> bool:
-        """¿La emisora rechazó la conexión en curso? Entonces se para ya (el
-        aviso del proxy pudo llegar después del fallo de FFmpeg)."""
+    @classmethod
+    def _rejected_skip_texts(cls, status: int, title: str) -> Tuple[str, str]:
+        """(aviso, motivo corto) de un rechazo que pasa a la siguiente, sin el
+        «: paso a la siguiente» que añade _on_failure ni el consejo de las
+        radios de pago (la URL no lleva cuenta)."""
+        short = cls._rejected_texts(status)[1]
+        if status == 429:
+            return f"«{title}» pide esperar antes de volver a conectar (HTTP 429)", short
+        if status >= 400:
+            return f"«{title}» rechazó la conexión (HTTP {status})", short
+        return f"«{title}» envió una página web en vez del audio", short
+
+    @staticmethod
+    def _has_account(url: str) -> bool:
+        """¿Lleva la URL algo que identifique una cuenta: una consulta (la
+        ?clave de DI.FM, un listen_key, un token) o usuario y contraseña? Las
+        radios de serie no llevan nada. Ante la duda, sí."""
+        try:
+            parts = urlsplit(url)
+            return bool(parts.query or parts.username or parts.password)
+        except ValueError:
+            return True
+
+    def _rejection_skips(self) -> bool:
+        """¿Un rechazo del item actual se salta como una radio caída en vez
+        de parar? Solo si aún no sonó desde que se eligió, la lista tiene más
+        y su URL no lleva cuenta: una emisora gratuita llena (Icecast da 403
+        con el cupo de oyentes lleno), vetada en este país o tras un portal
+        no tiene por qué tapar a las demás. Con cuenta se para a la primera:
+        los espejos y canales de un servicio de pago comparten la clave y
+        otra conexión alargaría la pausa. Implica not _treat_as_live(): un
+        rechazo que se salta nunca se reintenta."""
+        item = self._current_item()
+        return (item is not None and item['kind'] == 'url' and not self._played
+                and len(self._items_of(self._cur_list)) > 1
+                and not self._has_account(item['source']))
+
+    def _rejected_status(self) -> Optional[int]:
+        """El estado con que la emisora rechazó la conexión en curso, o None.
+        El aviso del proxy pudo llegar después del fallo de FFmpeg:
+        last_rejected ya lo sabe."""
         last = self._stream_buffer.last_rejected
-        if not (self._proxied and last and last[0] == self._proxy_sid):
+        if self._proxied and last and last[0] == self._proxy_sid:
+            return last[1]
+        return None
+
+    def _stop_if_rejected(self) -> bool:
+        """¿La emisora rechazó la conexión en curso y hay que parar? Entonces
+        se para ya, salvo que el rechazo se salte (_rejection_skips)."""
+        status = self._rejected_status()
+        if status is None or self._rejection_skips():
             return False
-        self._give_up(*self._rejected_texts(last[1]))
+        self._give_up(*self._rejected_texts(status))
         return True
 
     def _bump_buffer(self) -> None:
@@ -1420,8 +1524,15 @@ class MusicService(QObject):
 
     def _on_buffer_rejected(self, sid: int, status: int) -> None:
         """401/403…: la emisora no nos quiere ahora (cuenta en otro sitio o en
-        pausa). Insistir solo alarga la pausa: se para a la primera."""
+        pausa). Insistir solo alarga la pausa: se para a la primera. Una
+        emisora sin cuenta que aún no sonó, en una lista con más, pasa a la
+        siguiente (_rejection_skips) por el mismo camino que un fallo de
+        FFmpeg: _on_failure la reconoce por last_rejected, y el fallo que
+        llegue detrás ya no cuenta (_active) o se descarta (_proxied)."""
         if sid != self._proxy_sid or not self._proxied or not self._want:
+            return
+        if self._rejection_skips():
+            self._handle_failure('')
             return
         self._give_up(*self._rejected_texts(status))
 

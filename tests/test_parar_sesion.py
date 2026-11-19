@@ -178,6 +178,93 @@ def test_libre_acortado_y_vuelta_al_pomodoro_sin_parar(ctrl, clock, toasts):
     assert tp.time_label.text() == "10:00"
 
 
+# ------------------------------------------- el candado de la tarea, igual que «Parar»
+def _shorten(ctrl, minutes=10):
+    """Bajar la duración del pomodoro en Ajustes (el diálogo deja guardar con
+    uno pausado a mitad)."""
+    ctrl.apply_settings(dict(ctrl.data_handler.load_settings(), pomodoro_min=minutes))
+
+
+SHORTEN = pytest.mark.parametrize("shorten", [False, True], ids=["igual", "acortada"])
+
+
+@SHORTEN
+def test_el_candado_de_la_tarea_sigue_a_parar(ctrl, clock, toasts, shorten):
+    """Pausado a los 5 min de 35 y, «acortada», bajado a 10: el pomodoro
+    sigue empezado («Parar» a la vista), así que la tarea sigue bloqueada.
+    Con el criterio del modelo (contra pomodoro_duration) se podía cambiar."""
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    if shorten:
+        _shorten(ctrl)
+    assert _stop_shown(ctrl)
+    del toasts[:]
+    ctrl.select_task(ID_ASANA)
+    assert ctrl.model.active_task_id == ID1
+    assert [k for k, _ in toasts] == ['show_warning']
+    assert "la tarea activa está bloqueada" in toasts[0][1]
+
+
+def test_acortado_a_mitad_el_pomodoro_no_se_reparte_entre_tareas(ctrl, qtbot, clock,
+                                                                  toasts):
+    """El resto del MISMO pomodoro (le quedaban 30 min) iba a la otra tarea:
+    sus minutos, el pomodoro completado (XP, Asana, n8n) y el de la primera,
+    repartido. Ahora todo queda en la tarea con la que empezó."""
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    _shorten(ctrl)
+    ctrl.select_task(ID_ASANA)                         # bloqueada: no cambia
+    ctrl.toggle_timer()
+    _work(ctrl, clock, 30 * 60 + 30)
+    qtbot.wait(600)                                    # el tramo final va a los 50 ms
+    assert ctrl.model.is_break_time
+    assert ctrl.model.last_pomodoro_task_id == ID1
+    assert {c['task_id'] for c in _focus_chunks(ctrl)} == {ID1}
+
+
+@pytest.mark.parametrize("how", ["completar", "borrar"])
+@SHORTEN
+def test_completar_o_borrar_la_activa_cierra_el_pomodoro(ctrl, clock, toasts, monkeypatch,
+                                                        how, shorten):
+    """Completar o borrar la tarea activa cierra su pomodoro a medias. Con la
+    duración acortada se quedaba abierto y sin tarea: «Parar» a la vista, el
+    selector bloqueado y el play diciendo «Sin tarea activa»."""
+    from ui.dialogs import branded_dialogs as dialogs
+    monkeypatch.setattr(dialogs, "confirm", lambda *a, **k: True)
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    if shorten:
+        _shorten(ctrl)
+    if how == "completar":
+        ctrl.toggle_task_completion(ID1)
+    else:
+        ctrl.delete_task(ID1)
+    m = ctrl.model
+    assert m.active_task_id is None and not ctrl._work_in_progress()
+    assert m.remaining_time == ctrl._session_total == m.pomodoro_duration
+    assert not _stop_shown(ctrl) and ctrl.timer_panel.kind_buttons['free'].isEnabled()
+    assert [round(c['duration']) for c in _focus_chunks(ctrl)] == [300]   # nada de más
+
+
+@SHORTEN
+def test_un_sync_que_completa_la_activa_la_conserva_a_mitad(ctrl, clock, toasts, shorten):
+    """Con el pomodoro a medias, un sync que trae la tarea activa completada
+    no la suelta (el play preguntará si reabrirla); acortado, la soltaba."""
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    if shorten:
+        _shorten(ctrl)
+    for task in ctrl.data_handler.data['tasks']:
+        if task['id'] == ID1:
+            task['completed'] = True
+    ctrl._on_sync_finished(1)
+    assert ctrl.model.active_task_id == ID1
+
+
+@SHORTEN
+def test_reiniciar_como_administrador_avisa_del_pomodoro_a_mitad(ctrl, clock, shorten):
+    _pause_mid_pomodoro(ctrl, clock, minutes=5)
+    if shorten:
+        _shorten(ctrl)
+    assert ctrl._admin_restart_warning().startswith("Tienes un pomodoro en marcha")
+
+
 def test_parar_no_sale_en_el_descanso(ctrl, qtbot, clock, toasts):
     tp = ctrl.timer_panel
     _to_break(ctrl, qtbot, clock)
@@ -392,6 +479,41 @@ def test_parar_desde_la_mini_ventana(ctrl, qtbot, clock, toasts, monkeypatch):
     assert ctrl.model.free_elapsed == 0 and not ctrl.model.is_running
     assert not cw.stop_btn.isVisibleTo(cw)
     ctrl.show_normal()
+
+
+@pytest.mark.parametrize("height", [520, 600])
+@pytest.mark.parametrize("folded", [False, True], ids=["normal", "plegada"])
+def test_el_aviso_de_parar_deja_pasar_el_clic_al_play(ctrl, qtbot, clock, folded, height):
+    """La principal más baja que la de serie (720; en un portátil 1080p al
+    150 % no cabe), entera o plegada: la esquina del aviso son ▶,
+    «Reiniciar» y el hueco de «Parar». El aviso de «Parar» (tres líneas,
+    ~3,5 s) cae ahí justo cuando lo siguiente es pulsar ▶, y se quedaba el
+    clic. Ahora los clics lo atraviesan. En offscreen widgetAt no respeta
+    WindowTransparentForInput: se mira la bandera."""
+    from PySide6.QtCore import QPoint, QRect, QSize, Qt
+    from ui.widgets import toast
+    from ui.windows.main_window import MIN_WIDTH_COLLAPSED
+    win, tp = ctrl.window, ctrl.timer_panel
+    if folded:
+        ctrl.toggle_task_panel()
+        qtbot.wait(400)
+    win.resize(MIN_WIDTH_COLLAPSED if folded else 1100, height)
+    qtbot.wait(150)
+    _pause_mid_pomodoro(ctrl, clock, minutes=10)
+    before = {id(t) for t in toast._active_toasts}
+    tp.stop_btn.click()
+    [shown] = [t for t in toast._active_toasts if id(t) not in before]
+    try:
+        qtbot.wait(350)                                # tras su entrada
+        card = QRect(shown.mapToGlobal(QPoint(shown.PAD, shown.PAD)),
+                     shown.size() - QSize(2 * shown.PAD, 2 * shown.PAD))
+        play = QRect(tp.play_btn.mapToGlobal(QPoint(0, 0)), tp.play_btn.size())
+        assert card.intersects(play)                   # el caso: cae sobre ▶
+        assert shown.windowFlags() & Qt.WindowTransparentForInput
+    finally:
+        toast.dismiss(shown)
+        if folded:
+            ctrl.toggle_task_panel()
 
 
 def test_mini_ventana_sin_parar_en_el_descanso(ctrl, qtbot, clock, toasts):
