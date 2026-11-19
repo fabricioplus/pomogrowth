@@ -5,6 +5,229 @@ módulos, esquema de datos) se describe en [DOCUMENTACION.md](DOCUMENTACION.md).
 
 ---
 
+## v1.0.2 — 2026-11-19 · Radios de pago con una sola conexión, botón Parar y radios lofi de serie
+
+Otra versión de arreglos antes de la 1.1 (integraciones), salida del uso
+diario. Las radios de pago como DI.FM ya no pausan la cuenta: PomoGrowth abre
+una sola conexión con la emisora y no insiste si la rechaza. Las ventanas se
+recuperan solas («Siempre visible», una segunda PomoGrowth, los avisos y los
+diálogos), llega el botón «Parar» para terminar una sesión donde está y
+Música trae de serie tres radios lofi gratuitas.
+
+> [!IMPORTANT]
+> **Cambios de comportamiento**: en el modo Libre, la bandera «Terminar
+> sesión» (a la izquierda del play) pasa a ser **«Parar»**, el cuadrado a la
+> derecha del play, y «Reiniciar» ya no se ve en Libre (vuelve en el
+> Pomodoro). Una radio de pago que **rechaza la conexión** (HTTP 401, 403,
+> 429…, p. ej. porque la cuenta suena en otro dispositivo) **se para** con un
+> aviso, sin reintentar ni probar los otros espejos de su lista: cuando la
+> cuenta vuelva a estar libre, dale a reproducir.
+
+### Corregido
+- **DI.FM y las radios de pago pausaban la cuenta** («one stream at a time»:
+  una sesión por cuenta). Veían dos conexiones a la vez: la 1.0.1 abría otra
+  cada 30 s para leer el título de la canción (el lector ICY), el búfer
+  reconectaba a los 0,25 s de un corte y, si la primera conexión del búfer
+  fallaba, su 302 hacía que el reproductor repitiera la petición. Ahora:
+  - **Una sola conexión con la emisora**: toda radio por enlace (no HLS ni
+    una pista ya conocida) suena desde la primera conexión a través del
+    servidor local de PomoGrowth (127.0.0.1), sin precarga, así que tarda lo
+    mismo que ir directo. Es lo único que habla con la emisora, con un solo
+    User-Agent, y una conexión nueva no se abre hasta que la anterior está
+    cerrada (también con «Siguiente» varias veces seguidas). Pausar, parar,
+    cambiar de radio y cerrar la app dejan cero conexiones.
+  - **El título de la canción sale de la misma conexión** (los metadatos ICY
+    que la emisora intercala en el audio) y cambia cuando suena su audio:
+    antes se consultaba cada 30 s y, con búfer, podía ir hasta 20 s por
+    delante.
+  - **Sin insistir ante un rechazo**: con un 401, 402, 403, 407, 429 o 451, o
+    una página web donde iba el audio (la de «cuenta en pausa»), una sola
+    petición y la música se para con «La emisora rechazó la conexión (HTTP
+    403). Si es una radio de pago, comprueba que no esté sonando en otro
+    dispositivo y vuelve a darle a reproducir en unos minutos.» (con el 429,
+    que la emisora pide esperar), sin saltar a los otros espejos del .pls, que
+    llevan la misma clave.
+  - **Reconexiones espaciadas y con tope**: el servidor local reconecta a los
+    2, 4 y 8 s (antes 0,25 s) y da una conexión por muerta tras 10 s de
+    silencio (antes, con búfer, entre 2,5 y 8 s según la precarga): un hipo
+    corto de la red no abre otra. Los intentos de reconexión solo vuelven a
+    cero tras 60 s sonando (antes 15 s) y, como mucho, 10 conexiones con la
+    emisora en 10 minutos (la cuenta empieza de nuevo al darle a reproducir):
+    después, la música se para con «La emisora corta la conexión una y otra
+    vez…».
+  - Con una radio sonando, **pegar otro enlace** (otro canal, otro espejo o
+    el mismo) ya no conecta a la emisora para comprobarlo (ya pasaba en la
+    1.0): entra al momento, con el título de su dirección, y se comprueba al
+    reproducirlo. Las listas (.pls, .m3u…) se siguen bajando, y en pausa o
+    parada todo se comprueba como siempre.
+- **Una radio caída ya no tapa a las demás**: una radio guardada como
+  directo (como las de serie) que falla sin haber sonado desde que se eligió,
+  en una lista con más, pasa a la siguiente («No se pudo reproducir «X»:
+  paso a la siguiente») en vez de reintentarse un minuto y rendirse; sola en
+  su lista, se reintenta como antes. Lo mismo si una emisora sin cuenta en su
+  dirección (como las de serie) rechaza la conexión antes de sonar (llena,
+  vetada en el país o tras un portal): ««X» rechazó la conexión (HTTP 403):
+  paso a la siguiente».
+- **Aleatorio**: al rebarajar, una racha de fallos podía volver a un
+  elemento que ya había fallado y rendirse sin probar el que funcionaba;
+  ahora lo ya fallido va al final de la vuelta nueva.
+- **«Siempre visible»**:
+  - la marca de la bandeja no seguía a Ajustes y su clic hacía lo contrario
+    de lo que mostraba (y sacaba «Configuración guardada»): ahora coincide y,
+    desde la bandeja, solo se aplica la opción;
+  - cambiarlo con la ventana minimizada la restauraba de golpe: sigue
+    minimizada;
+  - si Windows u otra app le quita el «encima de todo», se repone solo en
+    unos 2 s (a la principal con la opción, a la vista y sin minimizar, y a
+    la compacta) y también al mostrarla, al restaurarla y al pulsar «Guardar»
+    en Ajustes, sin activarla ni moverla y con sus diálogos encima de ella.
+    Los diálogos de una ventana siempre visible también lo son.
+- **«Mostrar PomoGrowth»** y el doble clic en la bandeja con la compacta
+  abierta dejaban las dos ventanas: queda solo la principal. Pedir la
+  compacta a mitad del desvanecido de minimizar dejaba la principal
+  minimizada en la barra de tareas.
+- **Abrir PomoGrowth con ella ya abierta** (minimizada, en la bandeja, en
+  compacta o detrás de otras ventanas) trae al frente la abierta en vez de
+  solo avisar. Si la abierta es de otra carpeta (la instalada y una
+  portable, otro build), no se muestra: un aviso dice que hay otra abierta
+  con sus propios datos. Si se estaba despidiendo, la nueva espera a que se
+  cierre y arranca (antes avisaba de que ya estaba abierta y al final no
+  quedaba ninguna). Si la que se abre es administradora (la relanzada por
+  «Reiniciar como administrador» o «Ejecutar como administrador» a mano),
+  sigue el aviso que explica cómo usar el modo enfoque como administrador.
+- **Avisos** (toasts):
+  - sobre la compacta tapaban sus botones (▶, saltar, expandir): ahora salen
+    fuera de su tarjeta, debajo (o encima si abajo no cabe), y lo mismo sobre
+    el diálogo de Música;
+  - ninguno se queda los clics: en la principal baja, el de la esquina caía
+    sobre ▶ y «Reiniciar»;
+  - la música tiene un solo aviso a la vez (antes se apilaban) y, si fallan
+    varias pistas seguidas, avisa del primer «paso a la siguiente» y del
+    final; sin ninguna ventana a la vista (minimizada, en la bandeja), sus
+    errores finales llegan como notificación de Windows, como mucho una por
+    minuto.
+- **Ningún diálogo queda colgado de una ventana oculta o minimizada** (la app
+  se quedaba bloqueada, compacta incluida, sin que se viera por qué): los del
+  controlador salen sobre la compacta si es la que se ve o restauran antes
+  la principal, y mostrar la principal con una pregunta abierta sobre la
+  compacta trae la pregunta al frente.
+- **Errores de Asana en segundo plano**: con la principal fuera de la vista,
+  un sync que fallaba abría un diálogo invisible; ahora es un aviso junto a
+  la compacta o una notificación de la bandeja. El error del sync del
+  arranque sale al mostrarse la principal (antes colgaba de ella aún
+  oculta) y la bienvenida espera a que se cierre.
+- **Pomodoro pausado y duración acortada**: acortar en Ajustes la duración
+  del pomodoro con uno pausado a mitad lo daba por no empezado: se podía
+  cambiar de tarea (el pomodoro quedaba repartido entre dos) y de modo.
+  Ahora el candado de la tarea, el selector «Pomodoro | Libre», completar o
+  borrar la tarea activa, el sync y el aviso de «Reiniciar como
+  administrador» lo miden contra el total de la sesión.
+- La **ventana compacta** seguía mostrando la tarea activa que un sync
+  acababa de soltar (completada en Asana): se refresca al terminar el sync.
+
+### Añadido
+- **Botón «Parar»**: un cuadrado a la derecha del play (icono propio
+  `assets/icons/stop.svg`, gris y en el acento al pasar el ratón), también en
+  la ventana compacta (32 px) y en el menú de la bandeja («Parar la sesión»,
+  activo solo cuando se vería el botón).
+  - Con un **pomodoro pausado a mitad** (también tras una suspensión) lo
+    termina ahí: el tiempo queda guardado y los puntos del ciclo se
+    conservan, pero no cuenta como completado (sin XP ni monedas, sin
+    descanso, sin comentario en Asana, sin evento a n8n, sin mascota ni
+    pregunta de esfuerzo). Un aviso lo dice: «Pomodoro parado a los MM:SS: el
+    tiempo queda guardado. La XP y las monedas llegan al completarlo.». Con
+    el pomodoro corriendo no se ve: antes hay que pausarlo.
+  - En **Libre**, con la sesión en marcha o en pausa, la termina como hacía
+    «Terminar sesión» (desde 5 min, XP, monedas y comentario en Asana).
+  - Nunca en el descanso: comparte el hueco con «Saltar descanso» y nunca se
+    ven los dos a la vez.
+- **Tres radios lofi gratuitas de serie** en la lista «Radios lofi» de
+  Música: 24/7 Lofi Radio · Londres (MP3, 64 kbps), bigFM LoFi Focus ·
+  Alemania (AAC, 128 kbps) y NIA Radio LoFi · Numea (AAC, 128 kbps). En una
+  instalación nueva es la única lista propia (Música abre en ella); a quien
+  actualiza se le añade al final de las suyas. Solo se conectan al
+  reproducirlas. Se quitan, renombran y reordenan como cualquier otra, y lo
+  quitado no vuelve: ni al reabrir, ni al importar un backup anterior, ni con
+  «Borrar todos los datos», ni tras volver a la 1.0.1 y regresar. Una emisora
+  que ya tenías, aunque con la dirección algo distinta (http o una barra
+  final), no se duplica.
+
+### Cambiado
+- **Modo Libre**: desaparecen la bandera «Terminar sesión» y «Reiniciar»; la
+  sesión se termina con «Parar» (o completando o borrando la tarea activa, o
+  al salir). El play queda siempre centrado bajo el anillo: los botones de
+  los lados conservan su sitio aunque estén ocultos.
+- El aviso del selector «Pomodoro | Libre» bloqueado nombra solo los botones
+  de ese estado: «Termina el pomodoro con «Parar» (en pausa) o «Reiniciar»
+  para cambiar de modo», «Termina la sesión con «Parar» para cambiar de
+  modo» o «Salta el descanso o espera a que acabe para cambiar de modo».
+- **Radios**: una emisora https cuyo certificado no valida el servidor local
+  (un antivirus que inspecciona HTTPS, una cadena incompleta), o con un
+  fallo del proxy del sistema, suena directa en el mismo intento, como en la
+  1.0.1, sin título de la canción. Una reconexión con búfer que llega en otro
+  formato que la primera (el CDN de bigFM puede pasar de MP3 a AAC, o de
+  AAC-LC a HE-AAC, de una conexión a otra) ya no se empalma: el reproductor
+  la carga de nuevo.
+
+### Diagnóstico
+- `logs/pomogrowth_fallos.log`: faulthandler escribe las pilas de todos los
+  hilos si la app se cierra por un fallo nativo (de Qt o FFmpeg) o si el hilo
+  de la interfaz se queda bloqueado más de 5 s (un vigía que se re-arma cada
+  segundo; deja además un aviso en el log de la sesión). Lleva una leyenda,
+  una línea por arranque con la versión, la hora y el pid (el mismo que
+  «iniciado (pid N)» del log de la sesión) y rota a `.1` pasado ~1 MB. Solo
+  escribe en él la instancia que se queda. El vigía mide con un reloj que no
+  cuenta la suspensión del equipo y solo avisa si encuentra su propio
+  volcado.
+- El log de la sesión apunta los cambios de estado de la música («Música:
+  playing → reconnecting») y sus errores, sin enlaces, rutas ni títulos, y
+  cada «encima de todo» repuesto («Siempre visible: la ventana principal
+  había perdido el «encima de todo»; repuesto»).
+
+### Tests
+- 1149 en total (899 en la 1.0.1). Nuevos:
+  - `test_radio_una_conexion.py` (68), contra una emisora Icecast falsa
+    (`tests/fakes/icecast.py`) que cuenta las conexiones abiertas a la vez:
+    una sola conexión y los títulos en ella, rechazos sin insistir, 502 y
+    302, reconexiones espaciadas y con tope, formatos, la espera a la sesión
+    anterior, pausar, «siguiente» y el enfoque sin solapes, añadir un enlace
+    con la radio sonando, https que solo el proxy no valida y los tiempos por
+    defecto;
+  - `test_icy_y_formato.py` (8): el demultiplexor ICY y la firma del formato;
+  - `test_parar_sesion.py` (35);
+  - `test_ventanas.py` (85), con dos tests sobre ventanas Win32 reales que
+    se saltan si Windows no deja poner el «encima de todo»;
+  - `test_radio_catalog.py` (46) y `test_radio_catalog_e2e.py` (7). La suite
+    no siembra las radios de serie (`tests/conftest.py`): apuntan a internet
+    y la guarda de red no ve a FFmpeg.
+- `test_music_service.py` deja de probar el lector ICY (ya no existe) y suma
+  la racha de fallos con aleatorio; `test_timer_sounds.py`, que «Parar» suena
+  como pausar.
+- La guarda de red ya no da un falso rojo según la codificación de la consola
+  (`PYTHONIOENCODING`).
+
+### Interno
+- Se elimina `services/icy_monitor.py` (`IcyMonitor`, `read_icy_info`); los
+  títulos se leen con `services/icy.py` (`IcyDemuxer`, `parse_metaint`,
+  `parse_stream_title`, `has_stream_title`) y la firma del formato, con
+  `services/audio_format.py`. `services/stream_buffer.py` se reescribe
+  (`ConnectionBudget`; señales `rejected`, `metadata` y `track_detected`; sin
+  `underrun`), `MusicService` ya no tiene `icy_poll_ms` e `is_icy_status_line`
+  pasa a ser pública en `services/music_resolver.py`.
+- `core/radio_catalog.py` nuevo; `core/music_library.py` suma `seed_entries`,
+  `station_key`, `clean_seeds` y `MAX_SEEDS`; los datos, `music.seeds` y su
+  copia `settings.radio_seeds`; `DataHandler.SEED_DEFAULT_RADIOS`.
+- `services/singleton.py`: el canal «muéstrate» (`QLocalServer` por usuario,
+  `install_id`); `main.py`: `_claim_instance` y `_serve_session`;
+  `utils/win_native.py`: `is_admin`, `is_topmost`, `set_topmost`,
+  `keep_topmost` y `allow_foreground_to_others`; `utils/logging_setup.py`:
+  `enable_fault_log`, `start_ui_watchdog` y `scrub`.
+- `AppController._work_in_progress` (contra el total de la sesión) decide
+  «Parar», el candado de la tarea y el selector de modo; `toast.show_*`
+  devuelven el aviso y `toast.dismiss` lo quita.
+
+---
+
 ## v1.0.1 — 2026-11-13 · Seguridad del webhook y errores de Asana visibles
 
 Una versión de arreglos antes de la 1.1 (integraciones). Cierra el webhook de

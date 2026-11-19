@@ -46,10 +46,13 @@ consejos con IA.
 - **Temporizador pomodoro**: enfoque, descansos cortos y largos y ciclos a tu
   medida, con anillo de progreso, ventana compacta siempre visible e icono en
   la bandeja del sistema. Si el equipo se suspende, ese rato no cuenta como
-  trabajo.
+  trabajo. Con un pomodoro en pausa, **«Parar»** lo termina ahí: el tiempo
+  queda guardado y el ciclo se conserva, pero la XP y las monedas llegan solo
+  al completarlo.
 - **Modo Libre**: un cronómetro sin límite para concentrarte el tiempo que
-  quieras en una tarea; al terminar la sesión, a partir de 5 minutos, suma XP y
-  monedas.
+  quieras en una tarea; al terminar la sesión con «Parar», a partir de 5
+  minutos, suma XP y monedas. «Parar» está en la ventana principal, en la
+  compacta y en el menú de la bandeja.
 - **Sonidos del temporizador**: avisos propios al acabar cada pomodoro y cada
   descanso, y otros más discretos al iniciar y al pausar. Tres estilos
   (campana, marimba y tonos suaves) o los sonidos del sistema de Windows, con
@@ -79,10 +82,16 @@ consejos con IA.
 - **Modo enfoque**: bloquea los sitios que te distraen a través del archivo
   hosts de Windows, con un comodín para liberar un sitio solo hasta que cierres
   la app. Si hace falta, se reinicia como administrador con un botón.
-- **Música**: radios en directo, enlaces y archivos de tu equipo (hasta MP3 a
+- **Música**: trae de serie tres radios lofi gratuitas (24/7 Lofi Radio,
+  bigFM LoFi Focus y NIA Radio LoFi), que solo se conectan al reproducirlas, y
+  admite tus radios en directo, enlaces y archivos de tu equipo (hasta MP3 a
   320 kbps), con mini reproductor y la opción de que suene solo durante el
-  enfoque. Si una radio en directo se corta, la siguiente conexión llega con un
-  pequeño búfer (de 5 a 20 s) que crece solo cuando hace falta.
+  enfoque. Cada radio Icecast o SHOUTcast usa **una sola conexión** con la
+  emisora, también para el título de la canción, así que las de pago como
+  DI.FM no ven una sesión de más; si una de ellas rechaza la conexión, la
+  música se para con un aviso en vez de insistir. Si una radio en directo se
+  corta, la siguiente conexión llega con un pequeño búfer (de 5 a 20 s) que
+  crece solo cuando hace falta.
 - **Sonidos de ambiente**: lluvia, tormenta, océano, río, bosque y chimenea
   (grabaciones reales) y ruido blanco, rosa y marrón, para mezclarlos entre sí
   y con tu música desde el diálogo de Música. Cada sonido lleva su volumen y
@@ -100,6 +109,31 @@ consejos con IA.
   <img src="docs/captura-plan-de-hoy.png" width="860"
        alt="Diálogo «Planifica tu día» con las tareas sugeridas por vencimiento">
 </p>
+
+### Versión 1.0.2
+
+Radios de pago con una sola conexión, botón «Parar» y radios lofi de serie:
+
+- **Una sola conexión con cada radio**: el audio y el título de la canción
+  llegan por la misma conexión (antes el título se consultaba aparte cada
+  30 s), sin solapes al reconectar ni al cambiar de radio, para que DI.FM y
+  otras radios de pago no pausen tu cuenta. Si una de ellas rechaza la
+  conexión, la música se para con un aviso que lleva su código en vez de
+  insistir; una radio gratuita que no llega a sonar pasa a la siguiente de la
+  lista. Las reconexiones van espaciadas, con un tope de 10 conexiones en 10
+  minutos.
+- **Botón «Parar»** a la derecha del play, en la ventana compacta y en la
+  bandeja: termina un pomodoro en pausa (guarda el tiempo, sin XP ni monedas)
+  o una sesión del modo Libre, donde sustituye a la bandera «Terminar
+  sesión».
+- **Tres radios lofi gratuitas de serie** en la lista «Radios lofi», también
+  para quien actualiza. Las que quites no vuelven.
+- **Ventanas**: «Siempre visible» se recupera solo y su marca en la bandeja
+  coincide con Configuración; abrir PomoGrowth con la app ya abierta la trae
+  al frente; los avisos no tapan la ventana compacta ni se quedan los clics,
+  y los diálogos nunca quedan colgados de una ventana oculta.
+- **Diagnóstico**: `logs/pomogrowth_fallos.log` apunta los cierres
+  inesperados y las veces que la ventana se queda colgada.
 
 ### Versión 1.0
 
@@ -133,7 +167,7 @@ la versión portable se generan con los pasos de [Compilar](#compilar).
 
 ### Con el instalador (recomendado)
 
-1. Ejecuta `PomoGrowth_v1.0.1_instalador.exe` (queda en `dist/` al compilarlo).
+1. Ejecuta `PomoGrowth_v1.0.2_instalador.exe` (queda en `dist/` al compilarlo).
 2. Se instala solo para tu usuario y **sin permisos de administrador** en
    `%LOCALAPPDATA%\Programs\PomoGrowth`, con acceso en el menú Inicio y, si lo
    marcas, en el escritorio.
@@ -143,7 +177,7 @@ la versión portable se generan con los pasos de [Compilar](#compilar).
 
 ### Portable
 
-Descomprime `PomoGrowth_v1.0.1_portable.zip` en una carpeta con permiso de
+Descomprime `PomoGrowth_v1.0.2_portable.zip` en una carpeta con permiso de
 escritura y abre `PomoGrowth.exe`. Los datos se crean junto al exe, así que
 puedes llevarte la carpeta entera. Usa una ruta corta (por ejemplo
 `C:\PomoGrowth`): con rutas de más de 260 caracteres Windows no carga algunos
@@ -189,9 +223,17 @@ pip install pytest pytest-qt numpy
 $env:QT_QPA_PLATFORM = "offscreen"; python -m pytest tests -q
 ```
 
-Trabajan con datos de prueba en carpetas temporales, en silencio y sin tocar el
-archivo hosts real. `tests/test_timer_sounds.py` necesita numpy: comprueba que
-los WAV del repositorio son justo los que genera `scripts/build_sounds.py`.
+Trabajan con datos de prueba en carpetas temporales, en silencio, sin tocar el
+archivo hosts real y sin salir a internet: una guarda de red hace fallar el
+test que lo intente, las radios de serie no se siembran y las pruebas de radio
+usan servidores falsos en 127.0.0.1 (entre ellos una emisora Icecast,
+`tests/fakes/icecast.py`).
+`tests/test_timer_sounds.py` necesita numpy: comprueba que los WAV del
+repositorio son justo los que genera `scripts/build_sounds.py`. Algunas
+pruebas se saltan solas si el entorno no las permite: las de ventanas Win32
+reales, si Windows no deja poner una ventana «encima de todo» en ese momento,
+y las de radios https, si tu Python no trae los certificados de prueba de
+`Lib/test`.
 `tests/test_core_parity.py` va aparte: compara el motor con la v8 y necesita su
 carpeta.
 
@@ -201,12 +243,12 @@ carpeta.
 pip install pyinstaller
 python scripts/build_brand_assets.py   # solo si cambia la mascota (assets/icono.svg)
 python -m PyInstaller PomoGrowth.spec --noconfirm --distpath build/release --workpath build/work
-ISCC.exe installer\PomoGrowth.iss      # Inno Setup 6.6+ → dist\PomoGrowth_v1.0.1_instalador.exe
+ISCC.exe installer\PomoGrowth.iss      # Inno Setup 6.6+ → dist\PomoGrowth_v1.0.2_instalador.exe
 ```
 
 - El build queda en `build/release/PomoGrowth/` (`PomoGrowth.exe` +
   `_internal/`) y sin datos. `python scripts/make_portable.py` la comprime en
-  `dist\PomoGrowth_v1.0.1_portable.zip` (la versión portable) y se niega si junto
+  `dist\PomoGrowth_v1.0.2_portable.zip` (la versión portable) y se niega si junto
   al exe hay datos, por ejemplo si lo abriste para probarlo.
 - **Nunca compiles con la salida en `dist/`**: PyInstaller vacía la carpeta de
   salida entera y en `dist/` puede haber una instalación con datos reales. El
@@ -250,8 +292,13 @@ arquitectura, los módulos y el esquema de datos están en
   incluye ni los sobrescribe.
 - La app solo se conecta a lo que configures: Asana, la IA que elijas para la
   mascota (Claude, ChatGPT o tu propio servidor) y solo cuando le pides un
-  consejo, las integraciones opcionales y las radios o enlaces de música que
-  añadas.
+  consejo, las integraciones opcionales, las radios o enlaces de música que
+  añadas y las tres radios lofi de serie, estas solo cuando las reproduces.
+  Las radios Icecast y SHOUTcast suenan a través de un pequeño servidor local
+  (127.0.0.1) que solo atiende a tu equipo y es la única conexión con la
+  emisora.
+- Los registros de diagnóstico (`logs/`, también `pomogrowth_fallos.log`) se
+  quedan en tu equipo: no se envían a ningún sitio.
 - Los tokens se guardan en texto plano: no compartas la carpeta de PomoGrowth
   ni copias de ella.
 

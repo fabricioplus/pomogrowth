@@ -3,8 +3,9 @@
 > Fuente única para construir el sitio web de PomoGrowth: qué es, qué hace, por
 > qué elegirlo, especificaciones, marca y textos listos para usar.
 >
-> Todo lo que aparece aquí está comprobado contra el código de la **versión 1.0
-> (4 de noviembre de 2026)**, la primera pública. Lo que existe pero no conviene anunciar está en
+> Todo lo que aparece aquí está comprobado contra el código de la **versión
+> 1.0.2 (19 de noviembre de 2026)**; la primera pública fue la 1.0, del 4 de
+> noviembre. Lo que existe pero no conviene anunciar está en
 > [Qué no prometer](#15-qué-no-prometer); lo que falta decidir antes de
 > publicar, en [Por confirmar](#16-por-confirmar-antes-de-publicar).
 
@@ -37,7 +38,7 @@
 | **Producto** | PomoGrowth |
 | **Qué es** | App de escritorio para Windows que junta un temporizador pomodoro y tu lista de tareas, sincronizada con Asana |
 | **Eslogan actual** | «Enfócate por pomodoros, cumple tus tareas y haz crecer tu racha.» |
-| **Versión** | 1.0 · 4 de noviembre de 2026 (primera versión pública) |
+| **Versión** | 1.0.2 · 19 de noviembre de 2026 (la primera versión pública, la 1.0, salió el 4 de noviembre) |
 | **Precio** | Gratis: la versión Comunidad, la que funciona en tu equipo, lo será siempre. Donaciones voluntarias en [Ko-fi](https://ko-fi.com/L3Q421O7ZW) |
 | **Sistema** | Windows 10 (1809 o posterior) y Windows 11, de 64 bits |
 | **Idioma** | Español (interfaz, instalador y fechas) |
@@ -57,10 +58,10 @@
 > propias o de Asana. Cada día, al abrir la app, te saluda por tu nombre y te
 > propone un Plan de hoy según lo que vence y lo que tienes en curso. Premia
 > cada pomodoro (o cada sesión del modo Libre, sin límite de tiempo) con XP,
-> niveles y monedas, bloquea los sitios que te distraen, pone tu música o un
-> ambiente de lluvia, océano o ruido blanco mientras trabajas y te deja ganar
-> una mascota pixel que, si quieres, te da consejos con IA. Todo se guarda en
-> tu equipo.
+> niveles y monedas, bloquea los sitios que te distraen, pone tu música, una
+> de sus radios lofi o un ambiente de lluvia, océano o ruido blanco mientras
+> trabajas y te deja ganar una mascota pixel que, si quieres, te da consejos
+> con IA. Todo se guarda en tu equipo.
 
 ---
 
@@ -103,7 +104,7 @@ bloqueados.
 | **Tareas y Asana** | Tus tareas y las de Asana, en el mismo sitio | Lista unificada, alta también en Asana o ClickUp con un clic, tareas fijas, etiquetas con #, sincronización con cola sin conexión |
 | **Plan de hoy** | Empieza el día sabiendo qué hacer | Saludo con tu nombre, racha de días de uso y sugerencias por vencimiento y actividad reciente, con lo urgente ya marcado |
 | **Motivación** | Cada pomodoro cuenta | XP, 15 niveles, monedas, racha diaria, 7 temas y 3 mascotas que te ganas trabajando |
-| **Sin distracciones** | Cierra la puerta a las redes y pon tu música | Bloqueo de sitios para todo el equipo (con permisos de administrador, que la app pide con un botón), comodín por sitio, radios con búfer, música propia y sonidos de ambiente para mezclar |
+| **Sin distracciones** | Cierra la puerta a las redes y pon tu música | Bloqueo de sitios para todo el equipo (con permisos de administrador, que la app pide con un botón), comodín por sitio, tres radios lofi de serie, radios con búfer y una sola conexión con la emisora, música propia y sonidos de ambiente para mezclar |
 | **Tus datos, en tu equipo** | Sin cuentas, sin servidores de PomoGrowth, sin telemetría | Archivos locales con guardado a prueba de cortes, estadísticas completas sin conexión |
 
 ---
@@ -125,7 +126,7 @@ bloqueados.
 
 **Botones**:
 
-- Principal: **Descargar para Windows** · debajo, en pequeño: «Instalador · 75,8 MB · v1.0.1»
+- Principal: **Descargar para Windows** · debajo, en pequeño: «Instalador · 75,8 MB · v1.0.2»
 - Secundario: **Ver en GitHub** (con el icono de estrella: «Dar estrella»)
 
 **Línea de confianza** bajo los botones:
@@ -145,8 +146,9 @@ el temporizador en marcha). Ver [Recursos gráficos](#13-recursos-gráficos).
 | 3 | proveedores de IA para la mascota |
 | 5 | gráficos de estadísticas |
 | 9 | sonidos de ambiente para mezclar |
+| 3 | radios lofi gratuitas de serie |
 | 0 | cuentas, servidores en la nube o telemetría |
-| 899 | pruebas automáticas en la versión 1.0.1 |
+| 1149 | pruebas automáticas en la versión 1.0.2 |
 
 ---
 
@@ -179,15 +181,24 @@ Libre y sigue el tiempo que quieras.
   cambiar cada segundo. Desde una hora, el formato pasa a H:MM:SS.
 - **Modos «Enfoque» y «Descanso»** con su icono (tomate o taza) y su color. El
   centro del timer se funde suavemente al cambiar de fase.
-- **Controles**: iniciar/pausar (▶/⏸), Reiniciar y Saltar descanso (este solo
-  aparece en el descanso).
+- **Controles**: iniciar/pausar (▶/⏸), Reiniciar, Saltar descanso (solo en el
+  descanso) y **Parar**, el cuadrado a la derecha de ▶ (también en la ventana
+  compacta y en el menú de la bandeja):
+  - Con un pomodoro **en pausa** a medias, «Parar» lo termina ahí: el tiempo
+    queda guardado en la tarea y los puntos del ciclo se conservan, pero no da
+    XP, monedas ni descanso, ni deja comentario en Asana. Un aviso dice a qué
+    minuto se paró («Pomodoro parado a los 12:30…»). Con el pomodoro en marcha
+    no aparece: primero se pausa.
+  - En el modo Libre, «Parar» termina la sesión, en marcha o en pausa (ahí no
+    hay «Reiniciar»).
+  - ▶ no se mueve cuando aparecen o desaparecen los botones de al lado.
 - **Cada pomodoro va ligado a una tarea**: arriba del anillo se ve la «Tarea
   actual», y un botón permite completarla sin ir a la lista.
 - **Candado de tarea**: con un pomodoro a medias no puedes cambiar de tarea por
   accidente al revisar la lista.
-- **Registro honesto por tramos**: pausar, reiniciar, saltar un descanso,
-  terminar una fase o salir guardan en la tarea el tiempo transcurrido, sin
-  contarlo dos veces.
+- **Registro honesto por tramos**: pausar, reiniciar, parar, saltar un
+  descanso, terminar una fase o salir guardan en la tarea el tiempo
+  transcurrido, sin contarlo dos veces.
 - **«Enfocado hoy»**: contador en vivo del tiempo de enfoque del día.
 - **Tiempo enfocado en cada tarjeta** de tarea («50 min», «1 h 20 min»).
 - **Al terminar cada fase**: un aviso en pantalla («¡Buen trabajo! Pomodoro
@@ -195,7 +206,8 @@ Libre y sigue el tiempo que quieras.
 - **Sonidos propios** (Configuración → «Timer y ventana» → Sonidos):
   - Un aviso al acabar cada pomodoro (también al terminar una sesión Libre de 5
     minutos o más), otro distinto al acabar cada descanso y dos notas breves
-    al iniciar y al pausar. No suenan al reiniciar ni al saltar el descanso.
+    al iniciar y al pausar. No suenan al reiniciar, al parar un pomodoro en
+    pausa ni al saltar el descanso.
   - **Cuatro estilos**: Campana (el de serie), Marimba, Suave o «Sistema de
     Windows», que usa los sonidos del sistema. Los tres primeros son de
     PomoGrowth, sintetizados para la app, y no dependen del esquema de sonido
@@ -216,7 +228,8 @@ Libre y sigue el tiempo que quieras.
   enfocarte en una tarea el tiempo que quieras:
   - Muestra «Libre» con el icono del infinito (también en la ventana compacta),
     pasa a h:mm:ss desde la primera hora y el anillo da una vuelta por hora.
-  - Sin descansos ni ciclo: puedes pausar y seguir, y «Terminar sesión» la
+  - Sin descansos ni ciclo: puedes pausar y seguir, y «Parar» (el cuadrado a
+    la derecha de ▶, también en la ventana compacta y en la bandeja) la
     cierra. Completar la tarea activa o salir de la app también la terminan.
   - Desde 5 minutos, la sesión da **1 XP por minuto y 1 moneda cada 5
     minutos**; con menos, el tiempo queda registrado igual.
@@ -234,13 +247,23 @@ trabajas en cualquier otra app.
 
 - **Modo compacto**: una tarjeta pequeña (312 × 116 px) siempre encima de las
   demás ventanas, con mini anillo, tiempo, fase (o «Libre»), tarea y los botones
-  Iniciar/Pausar y Saltar descanso. Se arrastra desde cualquier punto.
+  Iniciar/Pausar, Saltar descanso y Parar. Se arrastra desde cualquier punto.
 - Los avisos y diálogos salen **junto a la ventana visible**, también en modo
-  compacto.
+  compacto, y nunca quedan colgados de una ventana oculta o minimizada:
+  - Sobre la ventana compacta, los avisos salen fuera de la tarjeta (debajo, o
+    encima si no caben), sin tapar sus botones.
+  - Los avisos no se quedan los clics: lo que hay debajo sigue respondiendo.
+  - Con la app minimizada o en la bandeja, los errores de Asana y de la música
+    llegan como notificación de Windows (los de la música, como mucho uno por
+    minuto).
 - **Icono en la bandeja del sistema** (la mascota). Menú: «Mostrar PomoGrowth»,
-  «Siempre visible», «Reproducir/Pausar la música» y «Cerrar».
-- **Siempre visible** (activado por defecto) y **opacidad** de la ventana
-  principal del 50 al 100 %.
+  «Siempre visible», «Reproducir/Pausar la música», «Parar la sesión» (activo
+  cuando se vería el botón «Parar») y «Cerrar». La marca de «Siempre visible»
+  coincide siempre con la de Configuración.
+- **Siempre visible** (activado por defecto): si Windows u otra app le quita
+  el sitio, en unos 2 s vuelve a quedar encima de las demás, sin robarte el
+  foco; también la ventana compacta. Y **opacidad** de la ventana principal
+  del 50 al 100 %.
 - **Diseño de Windows 11**: barra de título propia con la mascota, el nivel y
   los accesos de la app; esquinas redondeadas; Aero Snap al arrastrar; cambio de
   tamaño desde los bordes laterales e inferior, y fundidos al minimizar y
@@ -255,7 +278,11 @@ trabajas en cualquier otra app.
 - **Salir desde la app no pierde trabajo**: al salir con la X, Alt+F4 o
   «Cerrar» de la bandeja se guardan el tramo en curso, la posición de la ventana
   y los cambios para Asana, y se quita el bloqueo de sitios.
-- **Una sola instancia**: no puede haber dos timers pisándose los datos.
+- **Una sola instancia**: no puede haber dos timers pisándose los datos. Si
+  vuelves a abrir PomoGrowth con la app ya abierta (minimizada, en la bandeja,
+  en modo compacto o detrás de otras ventanas), la que ya estaba sale al
+  frente. Si la abierta es de otra carpeta (por ejemplo, la instalada y una
+  portable, cada una con sus datos), un aviso lo dice en lugar de traerla.
 - **Nítida con escalado**: iconos y mascota dibujados a la resolución real de la
   pantalla (110 %, 125 %, 150 %…).
 
@@ -431,8 +458,9 @@ racha. Lo que compras en la tienda te lo has ganado trabajando.
   (anillo de nivel y fichas con pomodoros, ciclos, tiempo enfocado, racha,
   monedas y experiencia total).
 - Solo cuentan los pomodoros que llegan a cero, aunque los hayas pausado por el
-  camino. Reiniciar un pomodoro a medias no da recompensa, y los descansos no
-  dan XP. En el modo Libre, la recompensa llega al terminar la sesión.
+  camino. Reiniciar o parar un pomodoro a medias no da recompensa (el tiempo
+  sí queda guardado), y los descansos no dan XP. En el modo Libre, la
+  recompensa llega al terminar la sesión.
 
 ### 4.8 Tienda, temas y mascotas
 
@@ -550,13 +578,26 @@ Windows mientras trabajas.
 ### 4.11 Música
 
 **Titular**: Tu música de concentración, dentro de la app.
-**Texto corto**: Radios en directo, enlaces y tus propios archivos, en MP3 de
-hasta 320 kbps o sin pérdida (FLAC, WAV), con un modo que solo suena mientras
-te enfocas.
+**Texto corto**: Tres radios lofi gratuitas listas para sonar, tus radios en
+directo, enlaces y tus propios archivos, en MP3 de hasta 320 kbps o sin
+pérdida (FLAC, WAV), con un modo que solo suena mientras te enfocas.
 
+- **Tres radios lofi gratuitas de serie** en la lista «Radios lofi»: 24/7
+  Lofi Radio (Londres), bigFM LoFi Focus (Alemania) y NIA Radio LoFi (Numea).
+  Están desde el primer arranque, también para quien actualiza (al final de
+  sus listas), y solo se conectan a internet cuando las reproduces. Se
+  quitan, renombran o reordenan como cualquier otra, y las que quites no
+  vuelven: ni al reabrir la app ni al importar una copia de antes.
 - **Radios en directo** Icecast, SHOUTcast y HLS. En Icecast y SHOUTcast v2, con
-  **la canción que suena en vivo** (se consulta cada 30 s) y el nombre de la
-  emisora.
+  **la canción que suena en vivo** y el nombre de la emisora, que llegan por
+  la misma conexión que el audio y cambian a la par de lo que suena.
+- **Una sola conexión con cada emisora** (Icecast y SHOUTcast): el audio y el
+  título salen de la misma conexión, y la app no abre una segunda al
+  reconectar, al pasar de una radio a otra ni al pegar otro enlace mientras
+  suena. Así las radios de pago que solo admiten un dispositivo a la vez
+  (como DI.FM) no ven una sesión de más. Si una radio de pago rechaza la
+  conexión (por ejemplo, porque tu cuenta suena en otro dispositivo), la
+  música se para con un aviso claro en vez de insistir.
 - **Enlaces directos** a canciones (http/https) y **listas** .m3u, .m3u8, .pls
   y .xspf, que se importan con todas sus pistas válidas (hasta 2000 por lista;
   de una lista de internet, solo sus enlaces http/https).
@@ -576,20 +617,27 @@ te enfocas.
   [§4.12](#412-sonidos-de-ambiente)).
 - **Mini reproductor junto al timer** (reproducir/pausar y siguiente) y control
   desde la bandeja del sistema.
-- **Reconexión automática** de radios (a los 2, 5, 10, 20 y 30 s) y **salto de
-  pistas que fallan**.
+- **Reconexión automática** de radios (a los 2, 5, 10, 20 y 30 s), con un
+  tope de 10 conexiones en 10 minutos: si una emisora corta una y otra vez,
+  la música se para con un aviso en vez de insistir.
+- **Salto de lo que falla**: una pista que no se puede reproducir, o una radio
+  que no llega a sonar (caída o llena), pasa a la siguiente de la lista con
+  un aviso. Con aleatorio, prueba todas antes de rendirse.
 - **Búfer para las radios que se cortan** (Icecast y SHOUTcast): la primera
-  conexión a una radio en directo es siempre directa, sin esperas. Si se
-  corta, la siguiente llega con un pequeño colchón que sube solo cuando hace
-  falta: 5 s tras el primer corte, y 10, 15 y 20 s tras los siguientes. Así un microcorte de la emisora no
-  detiene la música. Mientras se llena se lee «Almacenando en búfer… (5 s)» y,
-  al sonar, la insignia «Búfer 5 s» junto a «En directo». Al cambiar de emisora
-  vuelve a empezar sin búfer.
+  conexión a una radio en directo suena sin esperas, tan rápido como yendo
+  directo. Si se corta, la siguiente llega con un pequeño colchón que sube
+  solo cuando hace falta: 5 s tras el primer corte, y 10, 15 y 20 s tras los
+  siguientes. Así un microcorte de la emisora no detiene la música. Mientras
+  se llena se lee «Almacenando en búfer… (5 s)» y, al sonar, la insignia
+  «Búfer 5 s» junto a «En directo». Al cambiar de emisora vuelve a empezar
+  sin búfer.
 - **Pausa inteligente**: al reanudar, la radio vuelve en directo, sin audio
   viejo, y una canción por enlace sigue por donde iba (si el servidor permite
   saltar; si no, vuelve a empezar).
 - **Avisos claros** si pegas un enlace de YouTube, Spotify u otro servicio que
-  no deja sacar su audio. Los enlaces se muestran sin claves privadas.
+  no deja sacar su audio. Los enlaces se muestran sin claves privadas. Si la
+  radio se cae con la app minimizada o en la bandeja, te avisa una
+  notificación de Windows.
 
 ### 4.12 Sonidos de ambiente
 
@@ -716,7 +764,10 @@ luz, y puedes exportar e importar copias cuando quieras.
   para diagnóstico y carga la copia anterior.
 - **Confirmaciones a prueba de despistes**: las acciones destructivas no se
   aceptan con Enter, solo con un clic.
-- **Registro de diagnóstico** por sesión, sin tokens ni claves.
+- **Registro de diagnóstico** por sesión, sin tokens ni claves, y un registro
+  de fallos (`logs/pomogrowth_fallos.log`) que apunta los cierres inesperados
+  y las veces que la ventana se queda colgada más de 5 s, para poder
+  diagnosticarlos. Los dos se quedan en tu equipo.
 
 ### 4.15 Detalles que cuidan
 
@@ -739,7 +790,7 @@ luz, y puedes exportar e importar copias cuando quieras.
   @fabricioplus. Se cierra sola y se pausa si
   pasas el ratón por encima.
 - **Avisos discretos** que entran por la esquina, se apilan y desaparecen solos,
-  sin robar el foco.
+  sin robar el foco ni los clics.
 - **Firma «Fabricioplus»** al pie de Configuración, que abre el proyecto en
   GitHub.
 
@@ -786,7 +837,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 16. **En español**: interfaz, instalador y fechas, sin depender del idioma de
     Windows (salvo los menús estándar de clic derecho y los cuadros de abrir y
     guardar archivos).
-17. **Calidad comprobada**: 899 pruebas automáticas en la versión 1.0.1.
+17. **Calidad comprobada**: 1149 pruebas automáticas en la versión 1.0.2.
 18. **Gratis para siempre**: la versión Comunidad, la que funciona en tu equipo,
     es gratis y lo será siempre. Si te ayuda, puedes apoyarnos en Ko-fi.
 
@@ -809,35 +860,35 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 | Especificación | Valor |
 |---|---|
-| Versión | 1.0.1 (exe 1.0.1.0) · 13 de noviembre de 2026 (la 1.0, el 4 de noviembre) |
+| Versión | 1.0.2 (exe 1.0.2.0) · 19 de noviembre de 2026 (la 1.0, el 4 de noviembre) |
 | Precio | Gratis (versión Comunidad, local) |
 | Licencia | GPL-3.0-or-later (software libre; el instalador y el portable incluyen `LICENSE.txt`) |
 | Sistema operativo | Windows 10 versión 1809 (compilación 17763) o posterior, y Windows 11 |
 | Arquitectura | 64 bits (x64) |
 | Permisos | Instalar: usuario estándar, sin administrador. Modo enfoque: administrador (botón «Reiniciar como administrador», con el aviso UAC de Windows) |
 | Idioma | Español |
-| Instalador | `PomoGrowth_v1.0.1_instalador.exe` · 75,8 MB · Inno Setup, solo en español |
-| Versión portable | `PomoGrowth_v1.0.1_portable.zip` · 103,1 MB |
+| Instalador | `PomoGrowth_v1.0.2_instalador.exe` · 75,8 MB · Inno Setup, solo en español |
+| Versión portable | `PomoGrowth_v1.0.2_portable.zip` · 103,1 MB |
 | Ejecutable | `PomoGrowth.exe` (hasta la 9.4, versiones internas, `PomoGrowth9.exe`) |
 | Espacio instalado | ≈ 220 MB |
 | Carpeta de instalación | `%LOCALAPPDATA%\Programs\PomoGrowth` (solo para tu usuario) |
 | Accesos directos | Menú Inicio (siempre) y escritorio (opcional) |
-| Datos | Junto al programa: `pomogrowth_data.json`, `user_progress.json`, `focus_config.json` (con copias `.bak`) y la carpeta `logs/` |
+| Datos | Junto al programa: `pomogrowth_data.json`, `user_progress.json`, `focus_config.json` (con copias `.bak`) y la carpeta `logs/` (un registro por sesión y `pomogrowth_fallos.log`) |
 | Formato de datos | JSON UTF-8 legible, con guardado atómico y copia `.bak` |
 | Tecnología | Python 3.13 y PySide6 6.11 (Qt 6, Qt Widgets), empaquetado con PyInstaller |
 | Audio | Qt Multimedia (FFmpeg). Formatos: MP3, AAC, M4A, OGG, OGA, Opus, FLAC, WAV y WMA |
 | Sonidos incluidos | Avisos del temporizador: 12 WAV propios (3 estilos × 4 avisos), con QSoundEffect, o los sonidos de Windows. Ambiente: 6 grabaciones reales (CC0 y dominio público) y 3 ruidos sintetizados, en OGG Vorbis (≈ 10,9 MB) |
 | Listas de música | M3U, M3U8, PLS, XSPF y radios HLS |
-| Radios | Icecast, SHOUTcast (también v1) y HLS; título de la canción en vivo (ICY) en Icecast y SHOUTcast v2; búfer adaptativo de 5, 10, 15 o 20 s tras cada corte en Icecast y SHOUTcast |
+| Radios | Icecast, SHOUTcast (también v1) y HLS; una sola conexión con cada emisora Icecast o SHOUTcast, de la que salen también los títulos; título de la canción en vivo (ICY) en Icecast y SHOUTcast v2; búfer adaptativo de 5, 10, 15 o 20 s tras cada corte en Icecast y SHOUTcast; reconexión con tope de 10 conexiones en 10 minutos. De serie, tres radios lofi gratuitas por https (una en MP3 a 64 kbps y dos en AAC a 128 kbps) |
 | Gráficos | matplotlib (incluido en el exe) |
 | Exportación | CSV y XLSX (incluidos en el exe) |
 | IA de la mascota (opcional) | Claude (Anthropic), ChatGPT (OpenAI) o un endpoint compatible con OpenAI |
 | Integraciones | Asana (API oficial con token personal), ClickUp (solo crear tareas, con token personal), webhooks de entrada y salida (n8n) |
-| Puertos | 61968 TCP solo local (instancia única), 8081 TCP (webhook de entrada: solo local por defecto; en toda la red local, con clave, si lo eliges) y, desde el primer corte de una radio, un puerto aleatorio solo local en 127.0.0.1 (proxy del búfer de radios) |
+| Puertos | 61968 TCP solo local (instancia única), 8081 TCP (webhook de entrada: solo local por defecto; en toda la red local, con clave, si lo eliges) y, desde que suena la primera radio por enlace, un puerto aleatorio solo local en 127.0.0.1 (proxy de las radios: la única conexión con la emisora, sus títulos y el búfer) |
 | Ventana principal | 1100 × 720 la primera vez (después recuerda tamaño y posición); mínimo 900 × 520 (460 px de ancho con las tareas plegadas) |
 | Ventana compacta | 312 × 116 px, siempre encima |
 | Tipografía | Segoe UI Variable (Segoe UI en Windows 10), con cifras tabulares en el timer |
-| Pruebas | 899 pruebas automáticas (pytest y pytest-qt) |
+| Pruebas | 1149 pruebas automáticas (pytest y pytest-qt) |
 | Arranque (según la documentación) | ≈ 2 s; ≈ 12 s si sincroniza con Asana al abrir (casi todo es la red, tras una pantalla de carga) |
 
 ---
@@ -857,11 +908,15 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
   - El proveedor de IA que elijas, solo al hacer clic en la mascota y solo con
     cifras de progreso.
   - La URL de n8n, si configuras el evento de salida.
-  - Las radios y los enlaces de música que añadas. El búfer de las radios que
-    se cortan pasa por un pequeño servidor local (127.0.0.1) que solo atiende a
-    tu propio equipo.
+  - Las radios y los enlaces de música que añadas, y las tres radios lofi de
+    serie solo cuando las reproduces. Las radios Icecast y SHOUTcast suenan
+    a través de un pequeño servidor local (127.0.0.1) que solo atiende a tu
+    propio equipo y es la única conexión con la emisora.
 - **Los sonidos van dentro de la app**: los avisos del temporizador y los
   sonidos de ambiente no se descargan ni necesitan conexión.
+- **Los registros de diagnóstico se quedan en tu equipo** (carpeta `logs/`):
+  el de cada sesión, sin tokens ni claves, y el de fallos
+  (`pomogrowth_fallos.log`). No se envían a ningún sitio.
 - **Tu nombre y tu esfuerzo no salen de tu equipo**: no se envían a Asana, a
   ClickUp ni a la IA.
 - **La IA nunca recibe tus tareas**: solo números (nivel, XP, racha, minutos y
@@ -891,7 +946,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 | | Instalador (recomendado) | Portable |
 |---|---|---|
-| Archivo | `PomoGrowth_v1.0.1_instalador.exe` (75,8 MB) | `PomoGrowth_v1.0.1_portable.zip` (103,1 MB) |
+| Archivo | `PomoGrowth_v1.0.2_instalador.exe` (75,8 MB) | `PomoGrowth_v1.0.2_portable.zip` (103,1 MB) |
 | Permisos | Sin administrador | Sin administrador |
 | Dónde se instala | `%LOCALAPPDATA%\Programs\PomoGrowth` | Donde descomprimas la carpeta |
 | Accesos directos | Menú Inicio y, si quieres, escritorio | No |
@@ -900,7 +955,7 @@ Ventajas reales y comprobables, para una sección «Por qué PomoGrowth»:
 
 ### Instalar
 
-1. Descarga `PomoGrowth_v1.0.1_instalador.exe`.
+1. Descarga `PomoGrowth_v1.0.2_instalador.exe`.
 2. Ejecútalo: se instala solo para tu usuario, sin pedir la contraseña de
    administrador.
 3. Marca, si quieres, el acceso directo en el escritorio.
@@ -1010,10 +1065,19 @@ guardar. Un interruptor los apaga todos.
 **¿Qué es el modo Libre?**
 Un cronómetro sin tope para cuando no quieres cortar tu concentración cada 25
 minutos. Lo eliges con el selector «Pomodoro | Libre» encima del anillo y, con
-una tarea elegida, pulsas ▶: cuenta hacia arriba hasta que pulses «Terminar
-sesión». No tiene descansos. El tiempo queda en tu tarea y en las
-estadísticas, y desde 5 minutos la sesión da 1 XP por minuto y 1 moneda cada 5
-minutos (no cuenta como pomodoro).
+una tarea elegida, pulsas ▶: cuenta hacia arriba hasta que pulses «Parar» (el
+cuadrado a la derecha de ▶). No tiene descansos. El tiempo queda en tu tarea y
+en las estadísticas, y desde 5 minutos la sesión da 1 XP por minuto y 1
+moneda cada 5 minutos (no cuenta como pomodoro).
+
+**¿Qué hace el botón «Parar»?**
+Termina la sesión donde está y guarda el tiempo. En un pomodoro aparece al
+pausarlo: lo da por terminado ahí, sin XP ni monedas (llegan solo al
+completarlo), sin descanso y sin comentario en Asana, pero los minutos quedan
+en tu tarea y en «Enfocado hoy», y a diferencia de «Reiniciar» conserva los
+puntos del ciclo. En el modo Libre termina la sesión, en marcha o en pausa,
+con su recompensa si llega a 5 minutos. Está en la ventana principal, en la
+compacta y en el menú de la bandeja («Parar la sesión»).
 
 **¿Se crean mis tareas en Asana?**
 Solo si tú lo pides. Al escribir una tarea nueva, enciende el logo de Asana y
@@ -1028,6 +1092,25 @@ Porque esa radio se cortó y PomoGrowth reconectó con unos segundos de colchón
 para que un microcorte de la emisora no pare la música. Si vuelve a cortarse,
 el colchón sube a 10, 15 y 20 segundos. La música va esos segundos por detrás
 del directo; al cambiar de emisora, se vuelve a empezar sin búfer.
+
+**¿Por qué se paró la radio con «La emisora rechazó la conexión»?**
+Porque la emisora no quiso atenderte en ese momento: contestó con un error
+(el aviso lleva su código, como «HTTP 403») o con una página web en lugar del
+audio. Suele pasar con las radios de pago que solo admiten un dispositivo a la
+vez, como DI.FM, si tu cuenta está sonando en otro sitio (el móvil, el
+navegador) o la emisora la ha pausado un rato. PomoGrowth no insiste, para no
+alargar esa pausa: se para a la primera, sin reintentar ni probar otros
+servidores. Comprueba que no suene en otro dispositivo y vuelve a darle a
+reproducir en unos minutos. Si la emisora pide esperar (HTTP 429), el aviso
+lo dice. En cambio, una radio gratuita que rechaza la conexión antes de sonar
+(por ejemplo, porque está llena) no para la música si la lista tiene más:
+pasa a la siguiente.
+
+**¿Puedo quitar las radios lofi que trae PomoGrowth?**
+Sí. Están en la lista «Radios lofi» y se quitan, renombran o reordenan como
+cualquier otra; también puedes borrar la lista entera. Las que quites no
+vuelven, ni al reabrir la app ni al importar una copia de antes. Mientras no
+las reproduces, no se conectan a internet.
 
 **¿Qué pasa si suspendo el portátil con el timer en marcha?**
 Ese tiempo no cuenta como trabajo. Al despertar, el timer aparece pausado donde
@@ -1045,9 +1128,9 @@ enfocados y número de tareas pendientes. Nunca los nombres ni el contenido de
 tus tareas.
 
 **¿Puedo escuchar Spotify o YouTube?**
-No: esos servicios no dejan sacar su audio fuera de su app. Puedes usar radios
-en directo, enlaces directos a archivos de audio, listas de reproducción y la
-música de tu equipo.
+No: esos servicios no dejan sacar su audio fuera de su app. Puedes usar las
+tres radios lofi que trae de serie, tus radios en directo, enlaces directos a
+archivos de audio, listas de reproducción y la música de tu equipo.
 
 **¿Puedo mezclar sonidos de ambiente con mi música?**
 Sí. En el diálogo de Música, la entrada «Sonidos de ambiente» abre su
@@ -1098,6 +1181,7 @@ redes o con una donación en Ko-fi.
 
 | Versión | Fecha | Lo más importante |
 |---|---|---|
+| **1.0.2** | 19 nov 2026 | **Radios de pago con una sola conexión, botón Parar y radios lofi de serie**: cada radio usa una sola conexión con la emisora, también para el título de la canción, para que DI.FM y otras radios de pago no pausen tu cuenta; si una de ellas rechaza la conexión, la música se para con un aviso en vez de insistir, y las reconexiones van espaciadas y con tope; botón «Parar» para terminar un pomodoro en pausa (guarda el tiempo, sin recompensa) o una sesión Libre, en la ventana principal, la compacta y la bandeja; tres radios lofi gratuitas de serie en la lista «Radios lofi»; «Siempre visible» que se recupera solo y coincide con la bandeja; abrir PomoGrowth otra vez trae al frente la que ya estaba; avisos que no tapan la ventana compacta ni se quedan los clics; registro de fallos para diagnosticar cierres y cuelgues |
 | **1.0.1** | 13 nov 2026 | **Arreglos y seguridad**: el webhook de entrada solo atiende a tu equipo (o a tu red con clave) y crea siempre tareas propias; los errores de Asana (token rechazado, límite de peticiones, caídas) se ven y se reintentan solos; la pestaña de ClickUp dice lo que hace; un texto roto ya no impide guardar |
 | **1.0** | 4 nov 2026 | **Primera versión pública**: todo lo de las versiones internas, más modo Libre sin límite; alta de tareas también en Asana o ClickUp; tareas de Asana sin proyecto; saludo con tu nombre y racha de días de uso; valoración de esfuerzo; búfer para las radios que se cortan; modo enfoque con «Reiniciar como administrador» y a prueba de hosts de solo lectura; sonidos propios del temporizador (campana, marimba o suave, con su volumen); sonidos de ambiente para mezclar con la música (lluvia, océano, ruido blanco…); presentación animada del primer arranque; firma «Fabricioplus» y Ko-fi en la despedida. El programa pasa a llamarse `PomoGrowth.exe` |
 
@@ -1224,8 +1308,9 @@ la web se parezca a la app.
   sirven para ilustrar la sección de motivación.
 - **Iconos**: trazo fino de [Lucide](https://lucide.dev) (licencia ISC), más
   unos pocos propios o derivados al mismo estilo (el tomate,
-  `assets/icons/tomato.svg`, y la estrella rellena del esfuerzo,
-  `assets/icons/star-fill.svg`), y logos de redes, de Ko-fi y de ClickUp de
+  `assets/icons/tomato.svg`, la estrella rellena del esfuerzo,
+  `assets/icons/star-fill.svg`, y el cuadrado de «Parar»,
+  `assets/icons/stop.svg`), y logos de redes, de Ko-fi y de ClickUp de
   [Simple Icons](https://simpleicons.org) (CC0). En la app ningún icono
   funcional es un emoji.
 - **Formas**: tarjetas con 12 px de radio y botones con 8 px, superficies
@@ -1274,7 +1359,9 @@ Hacer con **datos de demostración** (nunca con un Asana real):
 - [ ] Ventana compacta sobre otra app
 - [ ] Modo Descanso (anillo azul-violeta)
 - [ ] Modo Libre en marcha pasada la hora (h:mm:ss, «Libre» con el infinito y
-      «Terminar sesión»)
+      «Parar»)
+- [ ] Pomodoro en pausa con «Parar» a la derecha de ▶, en la principal y en
+      la ventana compacta
 - [ ] Panel de nueva tarea con los logos de Asana y ClickUp encendidos y el
       menú «Mis tareas (sin proyecto)» y proyectos
 - [ ] «¿Cómo te llamas?» del primer arranque
@@ -1284,8 +1371,8 @@ Hacer con **datos de demostración** (nunca con un Asana real):
 - [ ] Mascota con un consejo de IA en la burbuja
 - [ ] Modo enfoque activo con un comodín, y sin permisos con «Reiniciar como
       administrador»
-- [ ] Música con una radio sonando y el mini reproductor, y con la insignia
-      «Búfer 5 s»
+- [ ] Música con la lista «Radios lofi», una radio sonando con el título de la
+      canción y el mini reproductor, y con la insignia «Búfer 5 s»
 - [ ] Mezclador de «Sonidos de ambiente» con dos o tres sonidos encendidos, y
       el punto del botón Música en la barra de título
 - [ ] Las tres diapositivas de la presentación (sus ilustraciones son
@@ -1404,6 +1491,9 @@ debería decir lo contrario:
   arrancar con Windows y sin firma digital.
 - La app no muestra su número de versión en pantalla (solo en las propiedades
   del exe y en el instalador).
+- Solo puede haber una PomoGrowth abierta a la vez en el equipo, aunque sean
+  de carpetas distintas (la instalada y una portable): para abrir la otra hay
+  que cerrar antes la primera.
 
 **Temporizador**
 - Las fases no arrancan solas: al terminar un pomodoro o un descanso hay que
@@ -1421,7 +1511,11 @@ debería decir lo contrario:
   predeterminado de Windows.
 - Para iniciar un pomodoro o una sesión Libre hay que elegir una tarea.
 - El contador del ciclo no se guarda: cerrar la app o pulsar Reiniciar lo pone
-  a cero.
+  a cero («Parar» lo conserva).
+- «Parar» solo aparece con el pomodoro en pausa (en marcha hay que pausarlo
+  antes) y nunca en el descanso. Un pomodoro parado no da XP ni monedas ni
+  cuenta para la racha de Recompensas, aunque sus minutos cuenten como tiempo
+  enfocado y sus tramos sumen en «Pomodoros» de Estadísticas (ver **Datos**).
 - Apagar o reiniciar Windows con el timer en marcha no guarda el tramo en curso:
   solo se guarda al salir desde la app.
 - El modo Libre no tiene descansos ni recordatorios: no avisa aunque lleves
@@ -1498,15 +1592,24 @@ debería decir lo contrario:
 - No bloquea aplicaciones de escritorio, solo sitios web.
 
 **Música**
-- No trae radios ni música de fábrica: la Carpeta lofi se instala vacía.
+- Trae tres radios lofi de serie, pero ninguna canción: la Carpeta lofi se
+  instala vacía. Las radios de serie son emisoras de terceros: si una cambia
+  de dirección o deja de emitir, deja de sonar (puedes quitarla de la lista).
 - No reproduce YouTube, Spotify, SoundCloud, Deezer, Apple Music ni Tidal.
-- El título de la canción en vivo no aparece en las radios SHOUTcast v1 ni HLS.
+- El título de la canción en vivo no aparece en las radios SHOUTcast v1 ni HLS,
+  ni cuando un antivirus que inspecciona las conexiones https no deja
+  validar el certificado de la emisora: entonces la radio suena directa, sin
+  título ni búfer.
 - **El búfer no evita todos los cortes**: solo entra tras un primer corte, no
   se usa en las radios HLS ni en algunas SHOUTcast antiguas (v1), y si la
   emisora calla más tiempo del que hay en el búfer, la música se para y vuelve
-  a conectar. Con búfer, el título de la canción puede ir unos segundos por
-  delante de lo que suena, y el nivel de búfer no se recuerda al cambiar de
-  emisora ni al cerrar la app.
+  a conectar. El nivel de búfer no se recuerda al cambiar de emisora ni al
+  cerrar la app.
+- Si una radio de pago rechaza la conexión, la música se para y no vuelve
+  sola: hay que darle a reproducir cuando la cuenta vuelva a estar libre.
+- Con una radio sonando, un enlace que pegues (salvo una lista .pls, .m3u…)
+  entra sin comprobar, con un nombre sacado de la dirección: si no funciona,
+  lo sabrás al reproducirlo.
 - Al añadir una carpeta no se leen sus subcarpetas.
 
 **Sonidos de ambiente**
@@ -1551,6 +1654,10 @@ debería decir lo contrario:
       (por ejemplo, un `TERCEROS.txt` en el instalador) antes de publicar
       descargas. Las grabaciones de ambiente ya llevan sus créditos
       (`CREDITOS.txt`, dentro de la app).
+- [ ] **Condiciones de uso de las emisoras de serie**: 24/7 Lofi Radio,
+      bigFM LoFi Focus y NIA Radio LoFi son de terceros. Comprobar que
+      permiten que una app publicada las ofrezca de serie (bigFM puede tener
+      restricciones de uso o geográficas) y si conviene nombrarlas en la web.
 - [x] **Versión Comunidad**: así llama el autor a la versión local y gratuita,
       y así aparece en el README, el CHANGELOG y esta ficha.
 - [ ] ¿Habrá **otra edición** (por ejemplo, en la nube)? Si no, basta con decir
@@ -1598,6 +1705,15 @@ debería decir lo contrario:
       Qt conozca la duración de los OGG, porque sin ella la vuelta deja un
       pequeño hueco, y el consumo con varios sonidos a la vez: dos
       reproductores por sonido).
+- [ ] **Probar en real lo nuevo de la 1.0.2**, que solo está cubierto por
+      pruebas automáticas: una radio de pago (DI.FM) con una sola conexión
+      todo el rato y el aviso de rechazo si suena en otro dispositivo; «Parar»
+      en la principal, la compacta y la bandeja; «Siempre visible» que se
+      recupera solo; abrir PomoGrowth otra vez (también como administrador y
+      desde otra carpeta), y que los clics atraviesan los avisos. Las tres
+      radios de serie sí se probaron con red real el 18 de noviembre.
+- [ ] **Medir el instalador y el portable de la 1.0.2** al compilarlos: esta
+      ficha conserva los tamaños de la 1.0.1 (75,8 y 103,1 MB).
 - [ ] **Ver la presentación con el exe** en una pantalla real, también al 150
       y al 200 % de escala.
 - [ ] **Consumo de memoria y CPU**: no está medido.
