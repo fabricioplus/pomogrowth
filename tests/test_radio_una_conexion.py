@@ -331,13 +331,19 @@ def test_otros_errores_contestan_502_sin_302(qtbot, emisora, proxy, mode, kind):
 
 def test_icy_200_ok_va_directo_por_302_tras_cerrar(qtbot, emisora, proxy):
     """I5: SHOUTcast v1 («ICY 200 OK») no se puede leer con requests: 302,
-    con la conexión del lector ya cerrada."""
+    con la conexión del lector ya cerrada. Se mira cuándo la cerró el lector
+    (el falso ve el cierre en ~10 ms): con solo esperar a que no quedara
+    ninguna abierta, el propio falso la cerraba a los 2 s y un proxy que la
+    cerrara tarde (dos conexiones a la vez), o nunca, pasaba igual."""
     emisora.set_mode('icy_v1')
     url = proxy.open(emisora.url(), 0, known_live=True)
     resp = requests.get(url, allow_redirects=False, timeout=10)
+    t_302 = emisora.now()
     assert resp.status_code == 302 and resp.headers['Location'] == emisora.url()
     qtbot.waitUntil(lambda: emisora.active_count() == 0, timeout=2000)
-    assert len(emisora.streams()) == 1
+    [rec] = emisora.streams()
+    assert rec['end'] == 'client_closed'
+    assert rec['t_close'] is not None and rec['t_close'] <= t_302 + 0.3
 
 
 def test_sin_precarga_un_corte_acaba_la_sesion_sin_reconectar(qtbot, emisora, proxy):
