@@ -188,6 +188,7 @@ class MusicService(QObject):
         self._focus_running = False
         self._attempts = 0            # reconexiones seguidas
         self._errors_in_row = 0       # pistas finitas fallidas seguidas
+        self._failed_ids: set = set()   # los items de esa racha (_neighbor)
         self._played = False          # avanzó alguna vez desde que se eligió
         self._progressed = False      # avanzó desde el último setSource
         self._live_runtime: Optional[bool] = None
@@ -416,7 +417,7 @@ class MusicService(QObject):
             return
         if item_id is None or self._lookup(list_id, item_id) is None:
             item_id = self._first_item_id(list_id)
-        self._errors_in_row = 0
+        self._reset_errors()
         same = (list_id == self._cur_list and item_id == self._cur_item
                 and self._loaded_key is not None)
         if same and self._want and self._state not in ('error', 'idle'):
@@ -432,7 +433,7 @@ class MusicService(QObject):
             return
         if self._want and self._state in ('loading', 'buffering', 'playing', 'reconnecting'):
             return
-        self._errors_in_row = 0
+        self._reset_errors()
         self._set_want(True)
         if self._gated():
             self._halt()
@@ -497,7 +498,7 @@ class MusicService(QObject):
             if self._loaded_key is not None and not self._is_live():
                 self._player.setPosition(0)
                 return
-        self._errors_in_row = 0
+        self._reset_errors()
         self._play_item(self._cur_list, item_id)
 
     def seek(self, ms: int) -> None:
@@ -845,8 +846,15 @@ class MusicService(QObject):
         if auto and self.repeat() == 'off':
             return None
         if self.shuffle() and pos >= len(order):
-            self._shuffle_order = self._new_shuffle(ids, avoid=self._cur_item)
-            return self._shuffle_order[0]
+            order = self._new_shuffle(ids, avoid=self._cur_item)
+            if from_error:
+                # Una racha de fallos: lo que ya falló, al final de la vuelta
+                # nueva. Así cada intento es otro item y rendirse tras tantos
+                # fallos como items (_on_failure) es haberlos probado todos
+                order = ([i for i in order if i not in self._failed_ids]
+                         + [i for i in order if i in self._failed_ids])
+            self._shuffle_order = order
+            return order[0]
         return order[pos % len(order)]
 
     def _select(self, list_id: str, item_id: str) -> None:
@@ -1049,8 +1057,13 @@ class MusicService(QObject):
         self._watchdog.start(self.WATCHDOG_MS)
         self.now_playing_changed.emit()
 
-    def _mark_playing(self) -> None:
+    def _reset_errors(self) -> None:
+        """Se acaba la racha de fallos: algo sonó o el usuario eligió."""
         self._errors_in_row = 0
+        self._failed_ids.clear()
+
+    def _mark_playing(self) -> None:
+        self._reset_errors()
         if self._state != 'playing':
             self._set_state('playing')
             if self._attempts and not self._stable_timer.isActive():
@@ -1179,6 +1192,7 @@ class MusicService(QObject):
             return
         self._unload()
         self._errors_in_row += 1
+        self._failed_ids.add(item['id'])
         count = len(self._items_of(self._cur_list))
         reason = message or f"No se pudo reproducir «{item['title']}»"
         short = short or message or "No se pudo reproducir"

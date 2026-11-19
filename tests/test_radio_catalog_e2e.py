@@ -194,6 +194,49 @@ def test_una_radio_de_serie_llena_pasa_a_la_siguiente(qtbot, tmp_path, emisora,
         _cerrar(svc, qtbot)
 
 
+def test_con_aleatorio_dos_caidas_no_tapan_a_la_que_funciona(qtbot, tmp_path, emisora,
+                                                           monkeypatch):
+    """Aleatorio y repetir «todo» (lo de serie) con 2 de las 3 radios caídas.
+    El usuario elige a mano la última del orden barajado; falla y, al
+    rebarajar, sale [b, a, c] (una de las salidas posibles): antes volvía a
+    pedir «a», ya caída, y se rendía con «ninguna pista» sin probar «c»."""
+    from services import music_service as ms
+    catalog = (rc.DefaultRadio('r0', "Radio 0", f"{emisora.base}/caducada?r=0",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('r1', "Radio 1", f"{emisora.base}/caducada?r=1",
+                               'audio/mpeg', 128),
+               rc.DefaultRadio('r2', "Radio 2", f"{emisora.base}/live?r=2",
+                               'audio/mpeg', 128))
+    svc = _servicio_con(tmp_path, monkeypatch, catalog)
+    svc.ERROR_SKIP_MS = 200
+    ids = {it['title']: it['id'] for it in svc.items(rc.SEED_LIST_ID)}
+    a, b, c = ids["Radio 0"], ids["Radio 1"], ids["Radio 2"]
+    orders = [[c, b, a], [b, a, c]]       # al empezar; al rebarajar tras fallar «a»
+
+    def fake_shuffle(seq):
+        seq[:] = orders.pop(0)
+    monkeypatch.setattr(ms.random, "shuffle", fake_shuffle)
+    errors = []
+    svc.error_occurred.connect(errors.append)
+    try:
+        assert svc.repeat() == 'all'
+        svc.set_shuffle(True)
+        svc.play(rc.SEED_LIST_ID)
+        qtbot.waitUntil(lambda: svc.state == 'playing', timeout=WAIT)
+        assert svc.current()['title'] == "Radio 2"
+        svc.play(rc.SEED_LIST_ID, a)                 # elige a mano «Radio 0»
+        qtbot.waitUntil(lambda: svc.state == 'playing' or not svc.is_playing,
+                        timeout=WAIT)
+        assert svc.state == 'playing' and svc.current()['title'] == "Radio 2"
+        assert errors == ["No se pudo reproducir «Radio 0»: paso a la siguiente",
+                          "No se pudo reproducir «Radio 1»: paso a la siguiente"]
+        paths = [p for p, _ua in _requests(emisora)]
+        assert paths.count("/caducada?r=0") == 1 and paths.count("/caducada?r=1") == 1
+        assert orders == []
+    finally:
+        _cerrar(svc, qtbot)
+
+
 def test_una_radio_sola_en_su_lista_se_reintenta(qtbot, tmp_path, emisora,
                                                 monkeypatch):
     """Sin otra a la que pasar, reintentar es lo único útil: la escalera de
