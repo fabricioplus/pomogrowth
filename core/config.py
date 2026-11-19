@@ -15,7 +15,7 @@ class Config:
 
     APP_NAME = "PomoGrowth"
     # 1.0: primera versión pública (las 9.0 a 9.4 fueron internas)
-    APP_VERSION = "1.0.1"
+    APP_VERSION = "1.0.2"
     # No cambiarlo: con él Windows agrupa la ventana con sus accesos directos
     # y anclados (el «v9» es de cuando se creó, no la versión)
     APP_USER_MODEL_ID = "PomoGrowth.App.v9"
