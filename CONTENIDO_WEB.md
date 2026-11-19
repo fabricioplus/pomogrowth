@@ -1712,8 +1712,8 @@ debería decir lo contrario:
       recupera solo; abrir PomoGrowth otra vez (también como administrador y
       desde otra carpeta), y que los clics atraviesan los avisos. Las tres
       radios de serie sí se probaron con red real el 18 de noviembre.
-- [ ] **Medir el instalador y el portable de la 1.0.2** al compilarlos: esta
-      ficha conserva los tamaños de la 1.0.1 (75,8 y 103,1 MB).
+- [x] **Instalador y portable de la 1.0.2 medidos** (19 de noviembre): 75,8 y
+      103,1 MB, como en la 1.0.1; instalada ocupa ≈ 220 MB.
 - [ ] **Ver la presentación con el exe** en una pantalla real, también al 150
       y al 200 % de escala.
 - [ ] **Consumo de memoria y CPU**: no está medido.
