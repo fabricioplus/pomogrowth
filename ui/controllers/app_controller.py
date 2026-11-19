@@ -889,7 +889,7 @@ class AppController(QObject):
             # en Asana) y no hay sesión en curso, soltar la selección.
             active = self._task_by_id(self.model.active_task_id)
             if (active and active.get('completed')
-                    and not self.model.is_session_in_progress()):
+                    and not self._work_in_progress()):
                 old = self.model.active_task_id
                 self.model.active_task_id = None
                 self.tasks_panel.set_active_card(old, None)
@@ -1882,7 +1882,7 @@ class AppController(QObject):
             if not (m.is_running or m.remaining_time < self._session_total):
                 return ''
             noun = "descanso"
-        elif m.is_session_in_progress():
+        elif self._work_in_progress():
             noun = "pomodoro"
         else:
             return ''
@@ -2128,7 +2128,9 @@ class AppController(QObject):
         # Con un pomodoro en curso (corriendo o pausado a mitad) la tarea del
         # timer queda BLOQUEADA: revisar la lista no debe cambiar el foco.
         # Se desbloquea al terminar el pomodoro, al reiniciar o sin tarea activa.
-        if self.model.is_session_in_progress() and self.model.active_task_id is not None:
+        # «En curso» como «Parar» (_work_in_progress): acortar la duración a
+        # mitad no lo deja por fresco ni reparte el pomodoro entre dos tareas
+        if self._work_in_progress() and self.model.active_task_id is not None:
             toast.show_warning(self.window,
                                "Sesión libre en curso — la tarea activa está bloqueada "
                                "(termina la sesión para cambiarla)" if self.model.is_free
@@ -2152,7 +2154,7 @@ class AppController(QObject):
             return
         now_completed = not task.get('completed')
         is_active = now_completed and self.model.active_task_id == task_id
-        if is_active and self.model.is_session_in_progress():
+        if is_active and self._work_in_progress():
             # Cerrar la sesión ANTES de marcarla completada: el último tramo
             # queda fechado antes del completado y cuenta en el esfuerzo de
             # este ciclo, no también en el siguiente de una tarea fija.
@@ -2259,7 +2261,7 @@ class AppController(QObject):
                                ok_text="Eliminar", danger=True):
             return
         if self.model.active_task_id == task_id:
-            if self.model.is_session_in_progress():
+            if self._work_in_progress():
                 # Cerrar la sesión ANTES de borrar: registra el tramo en curso
                 # en la tarea (como promete el diálogo) y evita que el candado
                 # quede abierto con un pomodoro corriendo sin dueño
